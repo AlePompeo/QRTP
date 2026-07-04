@@ -46,21 +46,30 @@ to the Makefile.
   path). It's gated behind `make WITH_OPENCV=1` and uses standard, stable OpenCV APIs
   (`cv::VideoCapture`, `cv::QRCodeDetector`, `cv::imshow`), but has never actually been compiled or
   run against a real camera. Build and smoke-test this before relying on it.
-- **The entire Windows port (`CMakeLists.txt`, `qr_encoder.cpp`'s `LoadLibrary` path,
-  `optical_link.cpp`'s `CAP_DSHOW` path) has never been compiled.** This dev environment is itself
-  a Linux VM with no Windows machine, no MSVC, and no local `cmake` to even dry-run the
-  configuration step. The Win32 API usage (`LoadLibraryA`/`GetProcAddress`/`FreeLibrary`,
-  `HMODULE`) is standard boilerplate and `libqrencode`'s vcpkg port was confirmed to actually exist
-  before being written into the docs, but "should be correct by inspection" is not the same as
-  "compiles." **First thing to do on a real Windows machine:** `cmake -B build -S .` (no OpenCV)
-  and `qrtp.exe demo somefile.txt` — if that doesn't work, nothing past it will either. Likely
-  first failure points if something's off: DLL name mismatch (`qrencode.dll` vs whatever vcpkg
-  actually names it — the code tries 3 variants but a 4th real-world name is possible), or an MSVC
-  calling-convention mismatch on the `QRcodeEncodeDataFn`/`QRcodeFreeFn` function pointer types
-  (assumed `__cdecl`, the default for a portable C library, but not verified against the actual
-  compiled DLL).
-- **`gui_win32.cpp` (`qrtp_gui.exe`) has never been compiled or run.** Same underlying gap as
-  above, plus its own specific risk areas worth checking first if it doesn't build/behave:
+- **UPDATE 2026-07-05: the Windows port now compiles — verified via MinGW-w64 cross-compilation
+  from this same Linux machine** (`cmake/toolchain-mingw64.cmake`), not just "should compile by
+  inspection" anymore. `qrtp.exe`, `qrtp_tests.exe`, and `qrtp_gui.exe` all build and link cleanly
+  as real PE32+ Windows binaries. Two real bugs surfaced and were fixed this way (see PROGRESS.md's
+  "MinGW cross-compilation" session): a missing `#define UNICODE`/`_UNICODE` before `<windows.h>`
+  in `gui_win32.cpp`, and a missing `-municode` link flag (MinGW-specific; MSVC doesn't need it).
+  **What's still NOT verified**: actually *running* any of these three binaries — no Wine, no
+  Windows machine available this session either. So runtime behavior (does the camera really open
+  with `CAP_DSHOW`, does the GUI actually paint/respond, does `LoadLibraryA("qrencode.dll")`
+  actually find the DLL at the paths tried) remains exactly as uncertain as before. The MSVC
+  calling-convention assumption (`__cdecl` for `QRcodeEncodeDataFn`/`QRcodeFreeFn`) is also still
+  unverified against a real MSVC-built `qrencode.dll` specifically — the cross-compiled MinGW build
+  used a MinGW-built `libqrencode.dll`, which is a different compiler than a vcpkg/MSVC one, so
+  this doesn't fully retire that risk if you're using vcpkg's MSVC-built package instead.
+- **The MinGW cross-compiled dependency set is bloated (~210MB / 91 DLLs).** Fedora's
+  `mingw64-opencv` package is built with every optional OpenCV module enabled (GDAL, PostgreSQL
+  client, GStreamer, Qt5, curl, poppler...) that this project never touches. Not a correctness bug
+  — every dependency was verified actually present (case-insensitively; a first pass falsely
+  flagged several as "missing" purely from a Linux-filesystem case-sensitivity bug in the packaging
+  script, not a real gap) — just unnecessarily heavy for what should be a lightweight tool. A
+  from-source OpenCV rebuild with only core/imgproc/videoio/highgui/objdetect enabled would likely
+  shrink this substantially; not attempted yet.
+- **`gui_win32.cpp` (`qrtp_gui.exe`) compiles cleanly now but has never been *run*.** Its own
+  specific risk areas worth checking first if it doesn't behave once it's actually launched:
   - Control layout uses fixed pixel coordinates tuned by eye, not measured against actual Windows
     DPI scaling — on a high-DPI display, text may clip inside the edit/button boxes. If so, the fix
     is `SetProcessDpiAwarenessContext` at startup plus either scaling the layout constants or

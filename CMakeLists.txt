@@ -19,6 +19,15 @@ set(QRTP_CORE_SOURCES
 
 if(WITH_OPENCV)
     find_package(OpenCV REQUIRED)
+    # Fedora's mingw64-opencv package ships an OpenCVConfig.cmake with a path-computation bug
+    # (one "../" too many walking up from its own location), which makes OpenCV_INCLUDE_DIRS
+    # resolve to a nonexistent directory when cross-compiling. Detect and fix it by deriving the
+    # include dir from the toolchain's sysroot instead. Native/vcpkg OpenCV installs never hit
+    # this (the guard condition is false there), so this is a no-op everywhere else.
+    if(MINGW AND NOT EXISTS "${OpenCV_INCLUDE_DIRS}/opencv2/opencv.hpp")
+        set(OpenCV_INCLUDE_DIRS "${CMAKE_FIND_ROOT_PATH}/include/opencv4")
+        message(STATUS "Worked around broken OpenCV_INCLUDE_DIRS -> ${OpenCV_INCLUDE_DIRS}")
+    endif()
     list(APPEND QRTP_CORE_SOURCES src/optical_link.cpp)
 endif()
 
@@ -56,4 +65,11 @@ if(WIN32 AND WITH_OPENCV)
     add_executable(qrtp_gui WIN32 src/gui_win32.cpp)
     target_link_libraries(qrtp_gui PRIVATE qrtp_core comdlg32 shell32 ole32)
     set_property(TARGET qrtp_gui PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    if(MINGW)
+        # MinGW's default CRT startup object looks for an (ANSI) WinMain; -municode switches it to
+        # the one that calls wWinMain instead, matching gui_win32.cpp's wide entry point. MSVC picks
+        # the right startup automatically from whichever of WinMain/wWinMain is defined, so it
+        # doesn't need this — this is a MinGW-specific linker requirement.
+        target_link_options(qrtp_gui PRIVATE -municode)
+    endif()
 endif()

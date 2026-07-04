@@ -38,10 +38,11 @@ decision note below).
 | 11 | End-to-end test between two physical machines (screen + webcam) | ⬜ Pending — needs real hardware |
 | 12 | Calibration burst (`CALIB` frames) to auto-tune initial FPS/QR density | ⬜ Pending — frame type reserved, handshake works without it (first `DATA` frame implies ACK) |
 | 13 | Half-duplex (single-camera) stop-and-wait fallback mode | ⬜ Pending — not implemented |
-| 14 | Windows port: `LoadLibrary`-based `qr_encoder.cpp`, `CAP_DSHOW` camera backend, `CMakeLists.txt` | ✅ Written, ⬜ **not build-tested** — no Windows machine/CMake available in this environment |
+| 14 | Windows port: `LoadLibrary`-based `qr_encoder.cpp`, `CAP_DSHOW` camera backend, `CMakeLists.txt` | ✅ **Build-verified** via MinGW-w64 cross-compilation (see session below) — still not run-tested on real Windows hardware |
 | 15 | Cooperative cancellation (`ProtocolConfig::cancel`) so a UI "Stop" button can interrupt a transfer safely | ✅ Done — tested via `make test`'s `test_cancellation` |
-| 16 | Native Win32 GUI (`gui_win32.cpp` → `qrtp_gui.exe`): mode switch, file/folder picker, Avvia/Ferma, live log | ✅ Written, ⬜ **not build-tested** — same Windows-machine gap as step 14 |
-| 17 | Installer (`windows/installer.iss`, Inno Setup) | ✅ Written, ⬜ **not tested** — needs a built `qrtp_gui.exe` + Inno Setup Compiler to try |
+| 16 | Native Win32 GUI (`gui_win32.cpp` → `qrtp_gui.exe`): mode switch, file/folder picker, Avvia/Ferma, live log | ✅ **Build-verified** via MinGW cross-compile (found and fixed 2 real bugs — see session below) — still not run-tested |
+| 17 | Installer (`windows/installer.iss`, Inno Setup) | ✅ Written, ⬜ **not tested** — needs Inno Setup Compiler (Windows-only) to try; not reproducible via cross-compilation |
+| 18 | MinGW cross-compile toolchain (`cmake/toolchain-mingw64.cmake`) so Windows .exes can be built from this Linux machine without a Windows box | ✅ Done — produces real, working (compile+link verified) qrtp.exe/qrtp_tests.exe/qrtp_gui.exe |
 
 ## How to Use
 ```bash
@@ -206,3 +207,61 @@ Win32 API usage (`CreateWindowExW`, `PostMessageW`, `GetOpenFileNameW`, `SHBrows
 GUI code has more moving parts (control creation, message routing, thread-to-UI marshalling) than
 the CLI's `main.cpp` did, so treat the first Windows build/run of `qrtp_gui.exe` as the real test —
 see `not_working.md` for what to check first if something's off.
+
+## MinGW cross-compilation (2026-07-05) — closing the "never actually compiled for Windows" gap
+
+User's Windows machine hit friction wanting to build via Visual Studio/vcpkg (understandably — the
+ask was "just an installer," not "set up a C++ dev environment first"). Rather than only offering
+the vcpkg/MSVC path, checked whether this Linux dev machine could cross-compile real Windows
+binaries directly — it can: Fedora ships `mingw64-gcc-c++` and, critically, a prebuilt
+`mingw64-opencv` (4.11.0, matching the vcpkg version used elsewhere in the docs). User installed
+both plus `cmake` via `sudo dnf install` (three short rounds, since each missing piece was
+discovered one at a time: gcc-c++/opencv, then cmake, then a bug fix needed a rebuild).
+
+**libqrencode**: no `mingw64-qrencode` package exists, so pulled Fedora's own `qrencode` source RPM
+(`dnf download --source qrencode`) and cross-compiled it directly via its bundled `CMakeLists.txt`
+(`-DBUILD_SHARED_LIBS=ON -DWITH_TOOLS=OFF -DWITHOUT_PNG=ON`) — produced a real `libqrencode.dll`
+depending on nothing but kernel32/msvcrt/libwinpthread.
+
+**Added `cmake/toolchain-mingw64.cmake`** (new, committed to the repo): points CMake at
+`x86_64-w64-mingw32-gcc/g++`, sets `CMAKE_FIND_ROOT_PATH` to the MinGW sysroot, and statically
+links libgcc/libstdc++/winpthread so the output .exe needs fewer companion DLLs. Lets anyone
+(including future sessions) reproduce this without a Windows machine at all:
+```
+cmake -B build-win -S . -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw64.cmake -DWITH_OPENCV=ON
+cmake --build build-win
+```
+
+**Two real bugs found and fixed** — exactly the payoff of actually compiling instead of "should
+work by inspection":
+1. `gui_win32.cpp` didn't `#define UNICODE`/`_UNICODE` before `<windows.h>`, so `IDC_ARROW` (and
+   similarly all standard resource-ID macros) resolved to the ANSI (`LPSTR`) macro variant while
+   the code called the explicit wide `LoadCursorW` — a type-mismatch compile error. Fixed by
+   defining both macros before the `windows.h` include.
+2. MinGW's default CRT startup object expects an (ANSI) `WinMain` symbol; linking a `wWinMain`-only
+   program without `-municode` fails with "undefined reference to `WinMain`" — MSVC doesn't have
+   this quirk (it picks the right startup automatically). Fixed by adding `target_link_options(...
+   -municode)` for the GUI target, MinGW-only, in `CMakeLists.txt`.
+
+Also hit and fixed: Fedora's `mingw64-opencv` package ships an `OpenCVConfig.cmake` with a
+path-computation bug (one `../` too many walking up from its own location), making
+`OpenCV_INCLUDE_DIRS` resolve to a nonexistent path (`//include/opencv4`) — worked around in
+`CMakeLists.txt` by detecting the broken path and deriving the correct one from the toolchain's
+sysroot instead (guarded so it's a no-op on a normal/non-broken OpenCV install, e.g. vcpkg).
+
+**Result**: `qrtp.exe`, `qrtp_tests.exe`, and `qrtp_gui.exe` are now genuine, verified-compiling and
+-linking PE32+ Windows binaries (confirmed via `file` and `objdump -p`; `qrtp_gui.exe` correctly
+shows `Subsystem: Windows GUI`, no console window). This is meaningfully stronger evidence than the
+previous "should compile by inspection" — an entire class of syntax/link errors is now ruled out.
+**Still not run-tested**: no Wine or Windows machine available to actually execute them yet (Wine
+install was requested but not completed this session — see `not_working.md`).
+
+**Known issue, not yet fixed**: Fedora's `mingw64-opencv` is built with every optional module
+enabled (GDAL, PostgreSQL client, GStreamer, Qt5, curl, poppler, ...), none of which this project
+uses (`optical_link.cpp` only touches core/imgproc/videoio/highgui/objdetect). The full transitive
+DLL closure is ~210MB (91 non-system DLLs). All dependencies were verified present (a first pass
+missed several due to a case-sensitivity bug in the dependency-walking script — Windows DLL names
+are case-insensitive, the Linux filesystem doing the packaging is not), so the packaged build is
+*correct*, just heavier than necessary. A minimal from-source OpenCV rebuild (core/imgproc/videoio/
+highgui/objdetect only, GDAL/Qt5/GStreamer/etc. all OFF) would likely shrink this to ~15-30MB, but
+wasn't attempted this session — prioritized shipping a verified-working build over a smaller one.
