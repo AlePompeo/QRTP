@@ -6,6 +6,31 @@ session.
 
 ## Resolved
 
+### Receive mode: the camera window stopped responding and crashed (send worked fine) (2026-07-05)
+
+**Symptom** (real user report, on the v2 build after the OpenEXR fix): starting a transfer in
+"Ricevi" (receive) mode opened the camera window as expected, but it then froze — Windows reported
+it as not responding, and it crashed. Sending worked correctly with no such issue.
+
+**Root cause**: an OpenCV HighGUI window (`cv::namedWindow`) only stays alive because something
+periodically pumps its Win32 message loop — that pump happens *inside* `cv::waitKey()` (and
+`cv::imshow()`). `OpticalLink::send()` calls both every frame, so the send-side window was always
+fine. `OpticalLink::try_receive()`, however, only ever called `cap->read(frame)` in a loop with a
+plain `std::this_thread::sleep_for` — it never once called `cv::waitKey`, so the receive-side
+window's message queue was never serviced at all. Exactly the asymmetry the user described: broken
+only on the side whose loop doesn't touch HighGUI's event pump.
+
+**Fix**: `try_receive()` now calls `cv::imshow(window_name_, frame)` on every captured frame (a
+live camera preview, which doubles as a real usability improvement — it helps the user aim the
+camera at the sender's screen) and `cv::waitKey(1)` once per loop iteration, replacing the old
+`sleep_for` (waitKey(1) already blocks ~1ms while pumping messages, so no separate sleep is
+needed). Rebuilt, re-verified `qrtp_gui.exe` still links and runs the same way, repackaged, and
+uploaded as v3 to the GitHub release.
+
+**Not yet re-confirmed by the user** as of this writing — the fix directly addresses the documented
+mechanism (Win32 windows need their message loop pumped or the OS marks them unresponsive), but
+real confirmation is still pending.
+
 ### qrtp_gui.exe crashed on launch: missing OpenEXR entry point (2026-07-05)
 
 **Symptom** (real user report, first actual run of the packaged Windows build):

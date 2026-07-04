@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <stdexcept>
-#include <thread>
 
 #include "qrtp/crc32.hpp"
 
@@ -62,6 +61,9 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
     while (std::chrono::steady_clock::now() < deadline) {
         cv::Mat frame;
         if (cap(capture_)->read(frame) && !frame.empty()) {
+            // Live camera preview — also helps the user physically aim the camera at the sender's
+            // screen, not just cosmetic.
+            cv::imshow(window_name_, frame);
             const std::string decoded = det(detector_)->detectAndDecode(frame);
             if (!decoded.empty()) {
                 std::vector<uint8_t> bytes(decoded.begin(), decoded.end());
@@ -71,13 +73,18 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
                 if (hash_bytes != last_decoded_hash_) {
                     last_decoded_hash_ = hash_bytes;
                     out = std::move(bytes);
+                    cv::waitKey(1);
                     return true;
                 }
                 // Same content as the last successful read — the display probably hasn't
                 // advanced to the next frame yet; keep polling.
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        // cv::waitKey pumps the HighGUI window's message loop (paints, lets it be moved/closed).
+        // send() gets this for free via its own per-frame waitKey call; try_receive() previously
+        // only slept, so its window never processed any messages, which Windows eventually reports
+        // as "Not Responding" and can crash — this call is what was missing, not just cosmetic.
+        cv::waitKey(1);
     }
     return false;
 }
