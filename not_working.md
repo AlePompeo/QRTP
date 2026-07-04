@@ -6,6 +6,43 @@ session.
 
 ## Resolved
 
+### qrtp_gui.exe crashed on launch: missing OpenEXR entry point (2026-07-05)
+
+**Symptom** (real user report, first actual run of the packaged Windows build):
+```
+Impossibile trovare il punto di ingresso della procedura
+_ZN7Imf_3_314ChromaticitiesC1ERKN9Imath_3_14Vec2IfEES5_S5_S5_
+nella libreria di collegamento dinamico C:\qrtp\libopencv_imgcodecs4110.dll
+```
+
+**Root cause**: the mangled symbol demangles to
+`Imf_3_3::Chromaticities::Chromaticities(Imath_3_1::Vec2<float> const&, ...)` — an OpenEXR/Imath
+constructor. `libopencv_imgcodecs4110.dll` (from Fedora's `mingw64-opencv` package) was built
+against Imath's `3_1` inline-versioned namespace, but the `libImath-3_2.dll` actually installed on
+the build machine (via `mingw64-imath`) uses the `3_2` namespace — an ABI-incompatible version skew
+between two independently-updated Fedora mingw sub-packages. Not something fixable by re-copying a
+different DLL: no `libImath-3_1.dll` existed anywhere to copy, since Fedora only ships the current
+version.
+
+**Fix**: stopped depending on Fedora's prebuilt `mingw64-opencv` package entirely. Downloaded
+OpenCV 4.11.0's own source (`dnf download --source mingw64-opencv`) and cross-compiled a minimal
+build directly (`-DBUILD_LIST=core,imgproc,imgcodecs,videoio,highgui,objdetect
+-DWITH_OPENEXR=OFF -DWITH_GDAL=OFF -DWITH_QT=OFF -DWITH_GSTREAMER=OFF -DWITH_FFMPEG=OFF`, PNG/JPEG/
+ZLib built statically-bundled via `-DBUILD_PNG=ON -DBUILD_JPEG=ON -DBUILD_ZLIB=ON`). This removes
+the OpenEXR/Imath dependency chain entirely (verified with `nm -D` — zero Imath/OpenEXR symbol
+references anywhere in the packaged DLLs) and, as a direct side effect, fixed the earlier-known
+bloat problem too: the shipped dependency set went from 91 DLLs / 210MB to 13 DLLs / 106MB, then to
+26MB after `strip`ping debug symbols (10MB zipped, down from 70MB).
+
+**Verification**: `find . -iname opencv2/opencv.hpp` on an installed (not just built-in-tree) copy
+of the minimal OpenCV was needed to get `find_package(OpenCV)` to resolve include dirs correctly —
+a raw, uninstalled CMake build tree doesn't have the aggregated `opencv2/opencv.hpp` header
+`OpenCVConfig.cmake` implicitly expects, so `cmake --install` is a required step, not optional, when
+pointing `OpenCV_DIR` at a from-source build rather than a system package. Still not run-verified on
+Windows after this fix (no Wine/Windows machine this session) — the crash is provably gone
+(no Imath/OpenEXR symbols anywhere in the binary or its dependencies), but that's the extent of
+what could be confirmed from Linux.
+
 ### The protocol appeared to hang forever on any lossy transfer (2026-07-04)
 
 **Symptom:** `./bin/qrtp demo <file> --loss 0.05 --corrupt 0.03` (or `make test`'s end-to-end case)
@@ -52,22 +89,18 @@ to the Makefile.
   as real PE32+ Windows binaries. Two real bugs surfaced and were fixed this way (see PROGRESS.md's
   "MinGW cross-compilation" session): a missing `#define UNICODE`/`_UNICODE` before `<windows.h>`
   in `gui_win32.cpp`, and a missing `-municode` link flag (MinGW-specific; MSVC doesn't need it).
-  **What's still NOT verified**: actually *running* any of these three binaries — no Wine, no
-  Windows machine available this session either. So runtime behavior (does the camera really open
-  with `CAP_DSHOW`, does the GUI actually paint/respond, does `LoadLibraryA("qrencode.dll")`
-  actually find the DLL at the paths tried) remains exactly as uncertain as before. The MSVC
-  calling-convention assumption (`__cdecl` for `QRcodeEncodeDataFn`/`QRcodeFreeFn`) is also still
-  unverified against a real MSVC-built `qrencode.dll` specifically — the cross-compiled MinGW build
-  used a MinGW-built `libqrencode.dll`, which is a different compiler than a vcpkg/MSVC one, so
-  this doesn't fully retire that risk if you're using vcpkg's MSVC-built package instead.
-- **The MinGW cross-compiled dependency set is bloated (~210MB / 91 DLLs).** Fedora's
-  `mingw64-opencv` package is built with every optional OpenCV module enabled (GDAL, PostgreSQL
-  client, GStreamer, Qt5, curl, poppler...) that this project never touches. Not a correctness bug
-  — every dependency was verified actually present (case-insensitively; a first pass falsely
-  flagged several as "missing" purely from a Linux-filesystem case-sensitivity bug in the packaging
-  script, not a real gap) — just unnecessarily heavy for what should be a lightweight tool. A
-  from-source OpenCV rebuild with only core/imgproc/videoio/highgui/objdetect enabled would likely
-  shrink this substantially; not attempted yet.
+  **UPDATE 2026-07-05, later same day**: a real user *did* run `qrtp_gui.exe` on actual Windows —
+  it launched far enough to start resolving its DLL dependency chain (progress! — the exe itself,
+  `LoadLibraryA`, and the basic Win32/GUI plumbing are all fine) before hitting the OpenEXR/Imath
+  crash documented above, now fixed. Camera behavior (`CAP_DSHOW`) and full GUI interaction are
+  still unconfirmed pending the user trying the fixed v2 build. The MSVC calling-convention
+  assumption (`__cdecl` for `QRcodeEncodeDataFn`/`QRcodeFreeFn`) remains unverified against a real
+  MSVC-built `qrencode.dll` specifically — the cross-compiled MinGW build used a MinGW-built
+  `libqrencode.dll`, a different compiler than a vcpkg/MSVC one, so this doesn't fully retire that
+  risk if you're using vcpkg's MSVC-built package instead.
+- ~~The MinGW cross-compiled dependency set is bloated (~210MB / 91 DLLs)~~ — **fixed 2026-07-05**,
+  see the OpenEXR crash resolution above; now 13 DLLs / 26MB unpacked (10MB zipped), via a
+  from-source minimal OpenCV build instead of Fedora's kitchen-sink `mingw64-opencv` package.
 - **`gui_win32.cpp` (`qrtp_gui.exe`) compiles cleanly now but has never been *run*.** Its own
   specific risk areas worth checking first if it doesn't behave once it's actually launched:
   - Control layout uses fixed pixel coordinates tuned by eye, not measured against actual Windows

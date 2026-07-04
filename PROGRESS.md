@@ -256,12 +256,56 @@ previous "should compile by inspection" — an entire class of syntax/link error
 **Still not run-tested**: no Wine or Windows machine available to actually execute them yet (Wine
 install was requested but not completed this session — see `not_working.md`).
 
-**Known issue, not yet fixed**: Fedora's `mingw64-opencv` is built with every optional module
-enabled (GDAL, PostgreSQL client, GStreamer, Qt5, curl, poppler, ...), none of which this project
-uses (`optical_link.cpp` only touches core/imgproc/videoio/highgui/objdetect). The full transitive
-DLL closure is ~210MB (91 non-system DLLs). All dependencies were verified present (a first pass
-missed several due to a case-sensitivity bug in the dependency-walking script — Windows DLL names
-are case-insensitive, the Linux filesystem doing the packaging is not), so the packaged build is
-*correct*, just heavier than necessary. A minimal from-source OpenCV rebuild (core/imgproc/videoio/
-highgui/objdetect only, GDAL/Qt5/GStreamer/etc. all OFF) would likely shrink this to ~15-30MB, but
-wasn't attempted this session — prioritized shipping a verified-working build over a smaller one.
+**Known issue at the time, since fixed** (see next session below): Fedora's `mingw64-opencv` is
+built with every optional module enabled (GDAL, PostgreSQL client, GStreamer, Qt5, curl, poppler,
+...), none of which this project uses. The full transitive DLL closure was ~210MB (91 non-system
+DLLs) — correct, but heavier than necessary, *and* it turned out to also hide a real ABI bug (see
+below).
+
+## Real-world crash + minimal OpenCV rebuild (2026-07-05) — first genuine run on real Windows
+
+User downloaded the v1 release build and ran `qrtp_gui.exe` on actual Windows hardware — the first
+real execution of any part of the Windows port outside this dev environment. It crashed
+immediately:
+```
+Impossibile trovare il punto di ingresso della procedura
+_ZN7Imf_3_314ChromaticitiesC1ERKN9Imath_3_14Vec2IfEES5_S5_S5_
+nella libreria di collegamento dinamico C:\qrtp\libopencv_imgcodecs4110.dll
+```
+
+Demangled: `Imf_3_3::Chromaticities::Chromaticities(Imath_3_1::Vec2<float> const&, ...)` — an
+OpenEXR/Imath constructor. Root cause: Fedora's `mingw64-opencv` package was built against Imath's
+`3_1` ABI-versioned namespace, but the currently-installed `mingw64-imath` provides `3_2` — the two
+Fedora sub-packages had drifted out of sync with each other. Not fixable by swapping in a different
+DLL (no `3_1`-ABI Imath DLL exists anywhere to copy); this is a genuine upstream packaging
+inconsistency, not a mistake in how the dependency set was collected.
+
+**Fix**: stopped relying on Fedora's prebuilt `mingw64-opencv` entirely. Pulled OpenCV 4.11.0's own
+source via `dnf download --source mingw64-opencv` and cross-compiled a minimal build directly:
+```
+cmake -B build-win -S . -DCMAKE_TOOLCHAIN_FILE=.../toolchain-mingw64.cmake \
+  -DBUILD_LIST=core,imgproc,imgcodecs,videoio,highgui,objdetect -DBUILD_SHARED_LIBS=ON \
+  -DWITH_OPENEXR=OFF -DWITH_GDAL=OFF -DWITH_QT=OFF -DWITH_GSTREAMER=OFF -DWITH_FFMPEG=OFF \
+  -DWITH_TIFF=OFF -DWITH_WEBP=OFF -DWITH_JASPER=OFF -DWITH_OPENJPEG=OFF \
+  -DBUILD_ZLIB=ON -DBUILD_PNG=ON -DBUILD_JPEG=ON
+cmake --build build-win -j$(nproc)
+cmake --install build-win   # required — a raw build tree has no aggregated opencv2/opencv.hpp,
+                             # which OpenCVConfig.cmake's consumers (like this project) expect
+```
+`WITH_OPENEXR=OFF` directly removes the broken dependency; the rest (`GDAL`/`Qt5`/`GStreamer`/
+`FFMPEG`/etc.) were disabled because nothing in `optical_link.cpp` needs them, and they were the
+source of the earlier bloat. `highgui` builds against native Win32 UI instead of Qt5 automatically
+once `WITH_QT=OFF`. PNG/JPEG/ZLib are statically bundled into the OpenCV DLLs themselves
+(`BUILD_*=ON`), so they don't need to ship as separate DLLs at all.
+
+Rebuilt `qrtp.exe`/`qrtp_tests.exe`/`qrtp_gui.exe` against this new OpenCV
+(`-DOpenCV_DIR=.../build-win/install/lib/cmake/opencv4`), re-ran the case-insensitive DLL dependency
+walk, and `strip`ped debug symbols from every binary (safe — only removes debugging info, not
+functionality). **Result: 91 DLLs / 210MB → 13 DLLs / 26MB (10MB zipped)**, and confirmed via
+`nm -D` that zero Imath/OpenEXR symbols remain anywhere in the packaged binaries. Uploaded as v2 to
+the same GitHub release, replacing the broken build.
+
+**Still unverified**: the user hadn't yet re-tested the v2 build as of this writing. The crash is
+provably eliminated at the binary level (no OpenEXR/Imath symbols exist to fail resolving anymore),
+but full runtime behavior (camera opens via `CAP_DSHOW`, GUI paints/responds correctly, QR
+detection actually decodes) is still pending real confirmation.
