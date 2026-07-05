@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <optional>
 #include <random>
@@ -8,7 +9,7 @@
 #include <vector>
 
 #include "qrtp/adaptive.hpp"
-#include "qrtp/cobs.hpp"
+#include "qrtp/base64.hpp"
 #include "qrtp/crc32.hpp"
 #include "qrtp/framing.hpp"
 #include "qrtp/link.hpp"
@@ -36,47 +37,38 @@ void test_crc32() {
     CHECK(c == 0xCBF43926u); // standard CRC-32/ISO-HDLC check value
 }
 
-void test_cobs() {
-    // Empty and single-byte cases, including the zero byte itself.
-    CHECK(qrtp::cobs_decode(qrtp::cobs_encode({})) == std::vector<uint8_t>{});
-    CHECK(qrtp::cobs_decode(qrtp::cobs_encode({0x00})) == std::vector<uint8_t>{0x00});
-    CHECK(qrtp::cobs_decode(qrtp::cobs_encode({0xAB})) == std::vector<uint8_t>{0xAB});
+void test_base64() {
+    // RFC 4648 standard test vectors.
+    auto to_bytes = [](const char* s) { return std::vector<uint8_t>(s, s + strlen(s)); };
+    CHECK(qrtp::base64_encode({}) == "");
+    CHECK(qrtp::base64_encode(to_bytes("f")) == "Zg==");
+    CHECK(qrtp::base64_encode(to_bytes("fo")) == "Zm8=");
+    CHECK(qrtp::base64_encode(to_bytes("foo")) == "Zm9v");
+    CHECK(qrtp::base64_encode(to_bytes("foob")) == "Zm9vYg==");
+    CHECK(qrtp::base64_encode(to_bytes("fooba")) == "Zm9vYmE=");
+    CHECK(qrtp::base64_encode(to_bytes("foobar")) == "Zm9vYmFy");
 
-    // The actual bug this exists to fix: binary data riddled with embedded zero bytes (what a
-    // real QRTP frame header looks like) must round-trip, and — the entire point of switching
-    // from Base64 to this — the encoded form must never contain a zero byte itself, regardless of
-    // how many zeros were in the input.
+    CHECK(qrtp::base64_decode("Zg==") == to_bytes("f"));
+    CHECK(qrtp::base64_decode("Zm9vYmFy") == to_bytes("foobar"));
+
+    // The actual bug this exists to fix: binary data riddled with embedded zero bytes (exactly
+    // what a real QRTP frame header looks like — e.g. a SYN frame's seq field is 0x00 0x00 0x00
+    // 0x00) must round-trip through encode+decode without truncating at the first zero.
     std::vector<uint8_t> binary_with_nulls = {0x01, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xAB, 0x00, 0x00};
-    auto encoded = qrtp::cobs_encode(binary_with_nulls);
-    for (uint8_t b : encoded) CHECK(b != 0x00);
-    auto roundtripped = qrtp::cobs_decode(encoded);
+    auto roundtripped = qrtp::base64_decode(qrtp::base64_encode(binary_with_nulls));
     CHECK(roundtripped == binary_with_nulls);
-    CHECK(roundtripped.size() == binary_with_nulls.size());
+    CHECK(roundtripped.size() == binary_with_nulls.size()); // would fail if truncated at a \0
 
-    // Exercise the 254-byte block-boundary case specifically (the point at which COBS must split
-    // a run of non-zero bytes even without an actual zero present) — a long run of non-zero bytes
-    // straddling 254, 255, 256 bytes.
-    for (size_t len : {253, 254, 255, 256, 509, 510, 511}) {
-        std::vector<uint8_t> data(len, 0x7F);
-        auto rt = qrtp::cobs_decode(qrtp::cobs_encode(data));
-        CHECK(rt == data);
-    }
-
-    // Round-trip every length 0..1600 of pseudo-random bytes (including zeros), covering the full
-    // realistic QRTP frame size range (chunk_size_max=1500 plus header/CRC is ~1523 raw bytes),
-    // and confirm the encoded form is zero-free for every one of them.
+    // Round-trip every length 0..64 of pseudo-random bytes (including zeros) to catch any
+    // off-by-one in the padding logic. Covers the full realistic QRTP frame size range: a DATA
+    // frame at the default chunk_size_max (1500) plus header/CRC overhead is ~1523 raw bytes.
     std::mt19937 rng(123);
     bool all_ok = true;
-    bool no_zero_bytes = true;
     size_t first_bad_len = 0;
     for (size_t len = 0; len <= 1600; ++len) {
         std::vector<uint8_t> data(len);
         for (auto& b : data) b = static_cast<uint8_t>(rng() & 0xFF);
-        const auto enc = qrtp::cobs_encode(data);
-        for (uint8_t b : enc) {
-            if (b == 0x00) no_zero_bytes = false;
-        }
-        if (qrtp::cobs_decode(enc) != data) {
+        if (qrtp::base64_decode(qrtp::base64_encode(data)) != data) {
             all_ok = false;
             first_bad_len = len;
             break;
@@ -84,12 +76,6 @@ void test_cobs() {
     }
     if (!all_ok) std::fprintf(stderr, "  (first failing length: %zu)\n", first_bad_len);
     CHECK(all_ok);
-    CHECK(no_zero_bytes);
-
-    // Malformed/truncated input (untrusted decoded QR content) must not crash or read out of
-    // bounds — mirrors decode_frame()'s own defensive posture in framing.cpp.
-    CHECK(qrtp::cobs_decode({5, 0x11, 0x22}).empty());  // code=5 claims 4 more bytes, only 2 present
-    CHECK(qrtp::cobs_decode({0}).empty());               // a literal zero can never be a code byte
 }
 
 void test_sha256() {
@@ -256,7 +242,7 @@ void test_cancellation() {
 
 int main() {
     test_crc32();
-    test_cobs();
+    test_base64();
     test_sha256();
     test_framing_roundtrip();
     test_adaptive_aimd();

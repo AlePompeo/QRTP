@@ -16,22 +16,22 @@ struct AdaptiveConfig {
 
     size_t chunk_size_initial = 256; // bytes of file payload per DATA frame (QR-density proxy)
     size_t chunk_size_min = 32;
-    // History: 1500 (v1-18) -> 2048, real regression, reverted -> 1024 -> 1500 (see adaptive.cpp's
-    // git history / not_working.md for the 2048 postmortem — turned out to be a render-loop bug,
-    // fixed separately, not chunk size itself) -> back down to 1024 by request. Independently of
-    // this constant's own value, the frame payload is now COBS-encoded rather than Base64 (see
-    // cobs.hpp, not_working.md 2026-07-05) — COBS's ~0.4% overhead vs. Base64's ~33% means the same
-    // chunk size now needs meaningfully fewer QR-capacity bytes than it used to, so 1024 today
-    // produces a noticeably smaller/less dense QR than 1024 did under the old Base64 encoding.
-    // Still no real evidence covers QR versions much above ~15-20, where physical module pixels
-    // shrink enough at a fixed on-screen size to plausibly hurt decode *reliability* even if raw
-    // decode time doesn't scale much (the v9 finding, same mechanism as raising EC level) —
-    // untested territory, not disproven safe either way.
+    // History: 1500 (v1-18) -> 2048, real regression, reverted -> 1024 -> 1500 (see not_working.md
+    // for the 2048 postmortem — turned out to be a render-loop bug, fixed separately, not chunk
+    // size itself) -> back down to 1024 by request. Also briefly tried switching the wire-format
+    // encoding from Base64 to COBS (less overhead, more real bytes per QR at the same chunk size)
+    // in the same window as this value — reverted after real hardware showed the transfer failing
+    // from the very first SYN_ACK (see not_working.md, 2026-07-05); back on Base64 now, so this
+    // constant's own trade is exactly what it was under the v27 analysis: still no real evidence
+    // covers QR versions much above ~15-20, where physical module pixels shrink enough at a fixed
+    // on-screen size to plausibly hurt decode *reliability* even if raw decode time doesn't scale
+    // much (the v9 finding, same mechanism as raising EC level) — untested territory, not disproven
+    // safe either way.
     // Safe regardless of this value: upshift() caps chunk growth by what the *current* EC level can
-    // actually encode (see max_chunk_for_ec_level in adaptive.cpp, also updated for COBS's real
-    // overhead) — previously nothing stopped chunk size from growing back up while EC level was
-    // still elevated from an earlier downshift, which could ask qr_encode_bytes() for a payload too
-    // large for that EC level and throw, hard-failing the transfer regardless of this constant.
+    // actually encode (see max_chunk_for_ec_level in adaptive.cpp) — previously nothing stopped
+    // chunk size from growing back up while EC level was still elevated from an earlier downshift,
+    // which could ask qr_encode_bytes() for a payload too large for that EC level and throw,
+    // hard-failing the transfer regardless of this constant.
     size_t chunk_size_max = 1024;
 
     ECLevel ec_level_initial = ECLevel::M;

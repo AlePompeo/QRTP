@@ -18,7 +18,7 @@ option(WITH_OPENCV "Build the real screen+camera optical link (requires OpenCV)"
 set(QRTP_CORE_SOURCES
     src/crc32.cpp
     src/sha256.cpp
-    src/cobs.cpp
+    src/base64.cpp
     src/framing.cpp
     src/adaptive.cpp
     src/link.cpp

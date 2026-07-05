@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <thread>
 
-#include "qrtp/cobs.hpp"
+#include "qrtp/base64.hpp"
 #include "qrtp/crc32.hpp"
 
 #ifdef _WIN32
@@ -190,13 +190,11 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
         return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
     };
 
-    // COBS first: our protocol frames are dense binary (a SYN's seq field alone is four 0x00
+    // Base64 first: our protocol frames are dense binary (a SYN's seq field alone is four 0x00
     // bytes), and cv::QRCodeDetector's decode path isn't trustworthy with embedded NUL bytes —
-    // see cobs.hpp. Unlike the Base64 this replaced, COBS only eliminates zero bytes specifically
-    // (the actual failure mode) rather than also restricting to printable text, at a fraction of
-    // Base64's ~33% expansion — more real file bytes fit in the same QR capacity, no larger/denser
-    // code required.
-    const std::vector<uint8_t> encoded_bytes = cobs_encode(frame_bytes);
+    // see base64.hpp. Base64 text is pure printable ASCII, sidestepping the question entirely.
+    const std::string encoded_text = base64_encode(frame_bytes);
+    const std::vector<uint8_t> encoded_bytes(encoded_text.begin(), encoded_text.end());
     const auto t_encode_start = Clock::now();
     const QrMatrix qr = qr_encode_bytes(encoded_bytes, cfg_.ec_level);
     const double encode_ms = ms_since(t_encode_start);
@@ -247,7 +245,7 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     if (cfg_.log) {
         cfg_.log("[optical] showing QR: version=" + std::to_string(qr.version) + " modules=" +
                   std::to_string(qr.width) + "x" + std::to_string(qr.width) + " module_px=" +
-                  std::to_string(scale) + " cobs_len=" + std::to_string(encoded_bytes.size()) +
+                  std::to_string(scale) + " base64_len=" + std::to_string(encoded_text.size()) +
                   " encode_ms=" + std::to_string(encode_ms) + " render_ms=" + std::to_string(render_ms));
     }
     cv::waitKey(static_cast<int>(1000.0 / std::max(1.0, cfg_.fps)));
@@ -302,11 +300,10 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
                                                            uint8_t(h >> 24)};
                 if (hash_bytes != last_decoded_hash_) {
                     last_decoded_hash_ = hash_bytes;
-                    const std::vector<uint8_t> cobs_bytes(decoded_text.begin(), decoded_text.end());
-                    out = cobs_decode(cobs_bytes);
+                    out = base64_decode(decoded_text);
                     if (cfg_.log) {
                         const int n = std::max(1, poll_count_since_last_decode_);
-                        cfg_.log("[optical] camera read a NEW QR: cobs_len=" + std::to_string(decoded_text.size()) +
+                        cfg_.log("[optical] camera read a NEW QR: base64_len=" + std::to_string(decoded_text.size()) +
                                   " decoded_bytes=" + std::to_string(out.size()) + " polls_since_last=" +
                                   std::to_string(poll_count_since_last_decode_) + " avg_capture_ms=" +
                                   std::to_string(capture_ms_accum_ / n) + " avg_decode_ms=" +

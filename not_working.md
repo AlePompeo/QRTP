@@ -6,6 +6,48 @@ session.
 
 ## Resolved
 
+### COBS broke the transfer starting from the very first SYN_ACK — reverted to Base64 (2026-07-05)
+
+**Symptom**: real user report right after the COBS switch shipped — the transfer no longer works
+at all, failing from the very first SYN_ACK (the handshake's second step). This is exactly the
+specific failure mode flagged as the open risk when COBS shipped: "if real hardware shows a full
+decode failure ... this is the first thing to revert."
+
+**Root cause (most likely, not directly confirmed — user reported the symptom, not a diagnostic
+log)**: every previous real-hardware confirmation of the optical channel was validated with
+Base64's output specifically — pure 7-bit printable ASCII (A-Z, a-z, 0-9, +, /, =). COBS's output
+is genuinely arbitrary binary (any byte 0x01-0xFF, no printable-text restriction) — that's exactly
+where its efficiency gain over Base64 comes from, but it means `cv::QRCodeDetector`'s internal
+`std::string` construction was being asked, for the first time, to round-trip byte values well
+outside anything previously exercised on real camera hardware. The project's own diagnosis of the
+*original* Base64-motivating bug was specific to embedded `0x00` truncation — COBS correctly
+eliminates those — but evidently something about the wider byte range itself (values >=0x80, or
+some other OpenCV-internal string-handling detail) isn't safe either, on this hardware. This
+remains a hypothesis, not confirmed by a diagnostic log — if COBS is revisited later, getting a
+real log of exactly what `detectAndDecode()` returns for a known COBS-encoded SYN would settle it.
+
+**Fix**: reverted to Base64 — restored `base64.hpp`/`base64.cpp` (from git history, unchanged from
+before the switch), reverted `OpticalLink::send()`/`try_receive()` back to
+`base64_encode`/`base64_decode`, and reverted `max_chunk_for_ec_level()`'s safety-ceiling formula
+back to Base64's `4*ceil(n/3)` expansion (using COBS's much smaller overhead there while actually
+encoding with Base64 would have under-counted the real per-frame cost, risking the exact
+unhandled-`qr_encode_bytes()`-exception failure that safety check exists to prevent). Removed
+`cobs.hpp`/`cobs.cpp`/`test_cobs()` again — git history has them if COBS is ever revisited with a
+real diagnostic log to work from instead of a hypothesis. `chunk_size_max` stays at 1024 (an
+independent, separate request from the same session, unaffected by the encoding scheme — SYN/
+SYN_ACK don't involve chunking at all, so there's no reason to believe that value contributed to
+this failure).
+
+**Lesson reinforced**: this is the second time in this session a change flagged in advance as
+"genuinely unverified, here's exactly what to check" turned out wrong on real hardware (the first
+being the forced camera resolution). The explicit up-front risk disclosure is what made this a
+fast, clean, one-step revert instead of a fresh diagnosis from scratch — worth continuing to do
+for anything that can't be verified without a camera.
+
+**Verified**: `make test`, a full randomized loopback transfer (byte-for-byte + hash match), native
+build, and the OpenCV-enabled Windows cross-compile all pass/build cleanly, matching the exact
+pre-COBS baseline.
+
 ### Replaced Base64 with COBS: ~33% more real file bytes per QR at the same chunk size (2026-07-05)
 
 User asked for alternative techniques to embed more bytes per QR *without* enlarging chunk size —
