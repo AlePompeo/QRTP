@@ -80,6 +80,16 @@ public:
 private:
     ILink& link_;
     ProtocolConfig cfg_;
+    // fps-only use of the AIMD machinery: the Sender's own AdaptiveController already ramps its
+    // *outgoing* display fps from cfg_.adaptive.fps_initial up as clean rounds accumulate, but
+    // nothing previously did the same for the Receiver's own outgoing SACK cadence — it stayed
+    // fixed at whatever OpticalLinkConfig::fps the link was constructed with for the entire
+    // transfer. Since every SACK send blocks this side's whole receive loop for up to
+    // 1000/fps ms (see OpticalLink::send()'s cv::waitKey), and sack_every_n_frames defaults to 1
+    // (a SACK per DATA frame), a receiver left at a low fixed fps directly throttles how fast it
+    // can keep up with an already-fast sender — see receive_file() for where this ramps up.
+    // window_size()/chunk_size()/ec_level() from this instance are never consulted; only .fps().
+    AdaptiveController adaptive_;
 
     void log(const std::string& msg) const;
     bool cancelled() const;

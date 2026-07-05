@@ -325,7 +325,8 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
 // Receiver
 // ============================================================================================
 
-Receiver::Receiver(ILink& link, ProtocolConfig cfg) : link_(link), cfg_(std::move(cfg)) {}
+Receiver::Receiver(ILink& link, ProtocolConfig cfg)
+    : link_(link), cfg_(std::move(cfg)), adaptive_(cfg_.adaptive) {}
 
 void Receiver::log(const std::string& msg) const {
     if (cfg_.log) cfg_.log("[receiver] " + msg);
@@ -385,6 +386,9 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
         f.session_id = session_id;
         f.ack_window = static_cast<uint32_t>(cumulative);
         f.payload = pack_sack_ranges(ranges);
+        // Applies this side's own ramped-up fps (see adaptive_ above) right before displaying —
+        // mirrors the Sender applying its own adaptive_.fps() right before every link_.send().
+        link_.set_fps(adaptive_.fps());
         link_.send(encode_frame(f));
     };
 
@@ -423,7 +427,16 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
                             std::to_string(f->payload.size()) + " bytes, already have " +
                             std::to_string(existing->second.size()) + ")");
                     }
+                    const uint64_t cumulative_before_advance = cumulative;
                     advance_cumulative();
+                    // Ramps this side's own display fps the same way the Sender ramps its own (see
+                    // adaptive_ above) — only counts genuine, non-retried forward progress as
+                    // "clean", mirroring the Sender's own advanced-and-!any_was_retried check, so a
+                    // frame the sender already had to retry doesn't count as evidence this side's
+                    // own cadence is safe to push faster.
+                    if (cumulative > cumulative_before_advance && !(f->flags_byte & flags::RETRANSMIT)) {
+                        adaptive_.record_clean_round();
+                    }
                 }
                 // else: offset already confirmed past cumulative -- a stale duplicate; ignore its
                 // payload entirely (never let already-locked-in reassembly data change), but still

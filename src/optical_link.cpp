@@ -26,6 +26,27 @@ namespace {
 cv::VideoCapture* cap(void* p) { return reinterpret_cast<cv::VideoCapture*>(p); }
 cv::QRCodeDetector* det(void* p) { return reinterpret_cast<cv::QRCodeDetector*>(p); }
 
+// Bounds decode cost independent of whatever resolution the camera negotiated: cv::QRCodeDetector's
+// per-attempt cost tracks the *input* image's pixel count, not just the QR's own module count (real
+// timing data from this project's own logs confirmed that — see not_working.md), so decoding a full
+// 1280x720-or-larger frame is real, avoidable per-attempt cost once the image is far bigger than what
+// resolving a QR's modules actually needs. 800px on the longest side matches the value a comparable
+// real-world project (jtalbott22/optical-data-bridge) uses for the same tradeoff — decode input
+// downscaled, capture/display resolution left untouched. Only ever shrinks, never upscales, so an
+// already-small capture (e.g. an explicit lower --width/--height override) passes through unchanged.
+// cv::INTER_AREA is the recommended OpenCV interpolation for shrinking specifically (avoids the
+// aliasing/moiré that INTER_LINEAR or INTER_NEAREST can introduce on fine, high-contrast QR module
+// edges) — this only feeds the decoder; the unscaled `gray` is still what the live preview shows.
+cv::Mat downscale_for_decode(const cv::Mat& gray) {
+    constexpr int kMaxDecodeDim = 800;
+    const int longest = std::max(gray.cols, gray.rows);
+    if (longest <= kMaxDecodeDim) return gray;
+    const double scale = static_cast<double>(kMaxDecodeDim) / longest;
+    cv::Mat small;
+    cv::resize(gray, small, cv::Size(), scale, scale, cv::INTER_AREA);
+    return small;
+}
+
 // Captures frames continuously in the background so try_receive() never has to block on
 // cap->read() itself — it just picks up whatever the latest ready frame is. Only ever touches the
 // camera (cap->read) and does a color-space conversion (cv::cvtColor); no HighGUI call
@@ -344,7 +365,7 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
             // matters for decode latency and for keeping the window responsive.
             if (++preview_frame_counter_ % 3 == 0) cv::imshow(camera_window_name_, gray);
             const auto t_decode_start = Clock::now();
-            const std::string decoded_text = det(detector_)->detectAndDecode(gray);
+            const std::string decoded_text = det(detector_)->detectAndDecode(downscale_for_decode(gray));
             decode_ms_accum_ += std::chrono::duration<double, std::milli>(Clock::now() - t_decode_start).count();
             ++poll_count_since_last_decode_;
             if (!decoded_text.empty()) {
@@ -502,7 +523,7 @@ bool OpticalLink::try_receive_multi(std::vector<uint8_t>& out, std::chrono::mill
 
             const auto t_decode_start = Clock::now();
             std::vector<std::string> decoded_texts;
-            det(detector_)->detectAndDecodeMulti(gray, decoded_texts);
+            det(detector_)->detectAndDecodeMulti(downscale_for_decode(gray), decoded_texts);
             decode_ms_accum_ += std::chrono::duration<double, std::milli>(Clock::now() - t_decode_start).count();
             ++poll_count_since_last_decode_;
 

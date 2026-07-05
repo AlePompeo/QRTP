@@ -6,6 +6,96 @@ session.
 
 ## Resolved
 
+### Compared against jtalbott22/optical-data-bridge: fixed a real receiver-side fps gap, added decode downscaling (2026-07-05)
+
+**Ask**: user pointed at github.com/jtalbott22/optical-data-bridge (a browser-based, single-HTML-file
+optical transport protocol with a similar design goal — screen+camera file transfer with adaptive
+rate control) and asked what it revealed as missing from this project. Cloned and read its source
+(`optical-data-bridge.html`) alongside its README to compare architectures.
+
+**What's architecturally similar (no gap)**: bidirectional link where each side both displays and
+reads QR codes; per-frame CRC (they use CRC16, this project CRC32) plus a whole-file hash verified
+end-to-end; selective retransmission driven by an explicit missing-range report; starting
+conservative (their `Adaptive()` starts at "1 unit, 1 tile, 3fps" — the same 3fps starting point
+this project converged back to independently) and backing off on errors. These are already-sound
+choices, not gaps.
+
+**Real gap found #1 — the Receiver's own display fps was never adapted.** Their sender ramps fps,
+then density, then tiling, in strict sequence; more importantly, tracing through this project's own
+`protocol.cpp` while making the comparison surfaced that `link_.set_fps()` is called only from
+`Sender::send_file()` — `Receiver::receive_file()` never calls it at all. Since
+`OpticalLink::send()` blocks on `cv::waitKey(1000/fps)` before returning, and
+`ProtocolConfig::sack_every_n_frames` defaults to 1 (a SACK sent for *every* DATA frame), every
+single SACK the receiver sends was blocking its *entire* receive loop (including reading further
+incoming DATA) for up to `1000 / receiver_fps` ms — and `receiver_fps` was whatever fixed value the
+GUI/CLI fps field held for the entire transfer, never increased. A receiver left at the safe
+fps=3.0 default would stall for up to 333ms after *every* DATA frame it acknowledged, regardless of
+how fast the sender had already ramped up. This plausibly explains part of the residual slowness
+seen even after MJPEG/autofocus/resolution were settled, and is a real, code-verified structural gap
+— not a guess.
+
+**Fix**: gave `Receiver` its own `AdaptiveController adaptive_` (protocol.hpp/protocol.cpp),
+constructed from the same `cfg_.adaptive`. Only its `.fps()` is consulted — `window_size()`,
+`chunk_size()`, and `ec_level()` are irrelevant to the receiver and simply climb unused. Whenever a
+DATA frame causes genuine forward progress (`cumulative` actually advances) *and* wasn't a
+sender-side retransmit, `adaptive_.record_clean_round()` is called, mirroring exactly the check the
+Sender already uses (`advanced && !any_was_retried`) — a frame the sender had to retry isn't
+evidence this side's own display cadence is safe to push faster. `send_sack()` now calls
+`link_.set_fps(adaptive_.fps())` right before every `link_.send()`, the same pattern the Sender
+already uses. Deliberately only ever ramps up (no `record_loss_event()` call added) — keeps the
+change narrow and low-risk, bounded by the same proven-safe `fps_initial=3.0` start and `fps_max=60`
+ceiling already validated on the Sender side.
+
+**Real gap found #2 — decode cost scaling with capture resolution, unaddressed.** An earlier entry
+this session already noted "a higher-resolution frame is more expensive for cv::QRCodeDetector to
+scan per attempt... its cost tracks the captured frame's size, not just the QR's own module count,"
+but nothing acted on it. The reference project explicitly downscales every captured frame to a
+bounded 800px (`SCAN_W`) before running its decoder (`jsQR`), regardless of the camera's actual
+capture resolution (which it requests at up to 1920x1080 `ideal` — so it keeps capture sharp, but
+bounds *decode* cost separately). This project had no equivalent: `detectAndDecode()` ran on
+whatever the camera negotiated, now defaulting to 1280x720.
+
+**Fix**: added `downscale_for_decode()` (`optical_link.cpp`, anonymous namespace) — bounds the
+longest side of the grayscale frame to 800px (matching the reference's own value) via
+`cv::resize(..., cv::INTER_AREA)` before either `detectAndDecode()` or `detectAndDecodeMulti()`.
+`INTER_AREA` specifically because it's the recommended OpenCV interpolation for shrinking (avoids
+aliasing/moiré that `INTER_LINEAR`/`INTER_NEAREST` can introduce on fine, high-contrast QR module
+edges). Only ever shrinks — an already-small capture (e.g. an explicit lower `--width`/`--height`
+override) passes through unchanged. The live camera preview window still shows the original,
+unscaled frame; only the copy fed to the decoder is affected.
+
+**Verified**: `make test` (all checks pass, including the full Sender/Receiver loopback test that
+exercises the new Receiver-side `adaptive_`), a full loopback demo transfer at higher loss/corruption
+than previous verification runs (0.15/0.03, byte-for-byte identical + hash match), native build, and
+the Windows cross-compile (all three .exe targets) build/pass cleanly. NOT verified on real camera
+hardware for either change — the receiver-fps fix in particular changes real protocol timing
+behavior that this session's loopback tests can't observe (loopback has no display/capture latency
+to begin with), so real-hardware feedback on both changes is the next useful signal.
+
+**Ideas surfaced but deliberately not implemented, for later discussion**:
+- **Sequential ordered-knob optimizer** (ramp fps fully, then density, then tiling, one at a time,
+  in a fixed order; back off in reverse) instead of this project's AIMD adjusting window/chunk/
+  EC/fps together every round. Could reduce the kind of correlated capture/decode-latency swings
+  seen in earlier real logs by isolating one variable at a time — but it's a genuine rewrite of
+  `adaptive.cpp`'s core model, not a tweak, and this project's current AIMD has a lot of validated
+  tuning behind it already. Worth a dedicated design discussion, not a drive-by change.
+- **Link watchdog / full reset on prolonged silence**: their sender resets its entire adaptive
+  state to conservative defaults if no receiver report is seen for 6s. This project has
+  per-offset RTO retransmission and `max_data_retries`, but nothing that resets `window_size_`/
+  `chunk_size_`/`ec_level_`/`fps_` back toward their initial values after a long *total* stall
+  (e.g. camera knocked out of focus mid-transfer). Would need `AdaptiveController::reset()` plus a
+  "time since any successful SACK" tracker in `Sender::send_file()`. Reasonably contained to add
+  later if real-hardware testing shows recovery from a bad state is too slow/grindy.
+- **Decode throttle decoupled from capture rate** (their `SCAN_MS=55` bounds decode attempts to
+  ~18/s regardless of how fast frames arrive): this project's `CaptureThread` already overlaps
+  capture with decode on separate threads, and capture is driver-paced rather than free-running, so
+  the benefit is less clear-cut here than in their single-threaded browser loop. Not implemented —
+  would need real capture-rate-vs-display-rate data from this project's own hardware to tune a
+  throttle interval without guessing, and a wrong guess risks *missing* genuinely new frames at high
+  fps, unlike the downscale change above which has no such failure mode.
+- CRC16 vs. this project's CRC32 per frame: ~2 bytes/frame difference, not meaningful at current
+  chunk sizes — not worth changing.
+
 ### Best-known real-hardware config confirmed: MJPEG on, autofocus on, 1280x720, fps ramping 3->24 (2026-07-05)
 
 **User report**: after testing the v38 toggles, the best-performing combination found on real
