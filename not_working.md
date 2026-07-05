@@ -6,6 +6,35 @@ session.
 
 ## Resolved
 
+### Throughput got much worse (not better) after raising chunk_size_max to 2048 — capacity math ignored real decode/render cost (2026-07-05)
+
+**Symptom**: real user report after the v14 "optimize throughput" pass — performance dropped a lot
+instead of improving, and specifically: large QR codes make the program lag, small/medium QR codes
+perform best.
+
+**Root cause**: `chunk_size_max` had been raised from 1500 to 2048 bytes on the reasoning that a
+version-40 QR at EC=L has the raw byte capacity for it (`base64_len(chunk + 23) <= 2953` per
+ISO/IEC 18004). That math checks whether the data *fits* in a symbol — it says nothing about how
+long that symbol takes to actually render (more modules to draw) or, far more importantly, decode
+(`cv::QRCodeDetector::detectAndDecode()` on a much denser image) on real camera/CPU hardware. This
+is the same category of mistake as the v9 finding ("raising EC level for a fixed chunk size shrinks
+module pixels, making decode *harder* not easier") — a constant that looked safe by a structural/
+capacity argument turned out to be dominated by a real-world cost the math didn't model at all.
+
+**Fix**: reverted `chunk_size_max` to 1500 (`include/qrtp/adaptive.hpp`) — the last value with
+confirmed-working real-hardware behavior behind it, per the user's direct A/B observation (worse
+with large QR, better with small).
+
+**Open question, not yet addressed**: `AdaptiveController::upshift()` decides to grow chunk size
+based purely on rolling frame-error-rate (`rolling_fer()`) — it has no visibility into how long each
+round trip actually took, even though `Sender` already feeds real RTT samples into
+`on_rtt_sample()`. A QR that's large enough to decode slowly but still successfully (i.e., FER stays
+low) would keep getting grown by the current logic even at whatever ceiling is configured, since
+"slow but correct" and "fast and correct" look identical to a purely error-rate-based signal. If
+lag reappears even at chunk_size_max=1500 on some hardware, the next lever to try is feeding RTT
+magnitude (not just pass/fail) into the upshift decision, not just raising/lowering the ceiling
+again.
+
 ### Throughput alternated between fast bursts and slowdowns after the v12 tuning pass — AIMD sawtooth from a flat, maximal decrease on every loss (2026-07-05)
 
 **Symptom**: after the v12 fix (fps ceiling raised to 60, faster upshift), the user reported

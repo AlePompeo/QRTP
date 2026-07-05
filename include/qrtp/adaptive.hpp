@@ -16,18 +16,15 @@ struct AdaptiveConfig {
 
     size_t chunk_size_initial = 256; // bytes of file payload per DATA frame (QR-density proxy)
     size_t chunk_size_min = 32;
-    // Was 1500, an arbitrary round number well below what a version-40 QR can actually carry.
-    // Upshift only ever reaches this ceiling at EC=L (see AdaptiveController::upshift — chunk size
-    // only grows while there's still headroom before EC level has to step down), so the real limit
-    // is: base64_len(chunk + kFixedOverhead=23) <= 2953 (ISO/IEC 18004 version-40/L byte capacity)
-    // => chunk <= ~2191 bytes. 2048 leaves ~5% margin below that edge. Only matters once the
-    // channel is already clean enough for AIMD to have climbed this high; the existing
-    // severity-scaled downshift/offset-splitting logic is what protects against this being too
-    // large for a given camera/lighting setup, exactly as it already does for fps_max. Raises the
-    // ceiling on an already self-correcting mechanism rather than asserting a new fixed rate, but
-    // — like every constant in this file — still wants real-hardware confirmation that a
-    // version-40-sized frame is actually decodable at the physical display size in practice.
-    size_t chunk_size_max = 2048;
+    // Briefly raised to 2048 on the theory that a version-40/EC=L QR has the raw byte capacity for
+    // it (base64_len(chunk + kFixedOverhead) <= 2953, ISO/IEC 18004) — but real-hardware testing
+    // showed throughput getting much worse, not better, and specifically pointed at large QR codes
+    // being the cause (smaller QR codes performed best). The capacity math only checked whether the
+    // data *fits*; it ignored that a bigger, denser code costs real wall-clock time to render and
+    // (especially) to decode on actual camera/CPU hardware — the same category of mistake as v9's
+    // "raising EC level shrinks module pixels" finding. Reverted to the last value with confirmed
+    // real-world behavior behind it.
+    size_t chunk_size_max = 1500;
 
     ECLevel ec_level_initial = ECLevel::M;
 
