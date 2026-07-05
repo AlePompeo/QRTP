@@ -6,6 +6,30 @@ session.
 
 ## Resolved
 
+### WeChatQRCode + 640x480 promoted from GUI-only to library/CLI defaults (2026-07-05)
+
+**Ask**: after setting WeChatQRCode-on/640x480/30fps as GUI-only defaults (previous entry), the
+user decided WeChatQRCode and 640x480 specifically should also become the library/CLI defaults —
+fps was *not* included in this, so it stays GUI-only at 30 while the library/CLI default stays
+3.0 (`AdaptiveConfig::fps_initial`/`OpticalLinkConfig::fps`, deliberately unchanged since raising
+it at the code level has caused real regressions before — see the fps_initial=24 history earlier
+this session).
+
+**Fix**: `OpticalLinkConfig::camera_width`/`camera_height` now default to `640`/`480` (was
+`1280`/`720`), and `OpticalLinkConfig::use_wechat_qrcode` now defaults to `true` (was `false`).
+Since `use_wechat_qrcode` flipped its default, the CLI flag changed from `--wechat-qrcode` (turn
+on) to `--no-wechat-qrcode` (turn off) — same rename pattern already used for `--mjpeg` ->
+`--no-mjpeg` when `request_mjpeg`'s default flipped earlier this session. Updated the GUI's own
+code comments for the resolution field and WeChatQRCode checkbox, since they're no longer
+"GUI-only, differs from the library default" — they now simply match it; only the FPS field's
+comment still describes a real GUI-vs-library divergence.
+
+**Verified**: `make test`, a full loopback demo transfer (byte-for-byte identical + hash match),
+native build, and the Windows cross-compile (all three .exe targets) build/pass cleanly. NOT
+verified on real camera hardware — this is now the out-of-the-box experience for both the GUI and
+`qrtp send`/`qrtp receive`/`qrtp_gui.exe` alike, so the first real transfer on this combination is
+the one that matters most to hear back about.
+
 ### GUI-only defaults changed: WeChatQRCode on, 640x480, 30fps (2026-07-05)
 
 **Ask**: set the GUI's pre-filled defaults to WeChatQRCode enabled, 640x480 resolution, and 30fps —

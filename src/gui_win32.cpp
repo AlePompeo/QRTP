@@ -214,11 +214,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // handshake-survives-camera-settling starting point documented in AdaptiveConfig.
             mk(L"EDIT", L"30", WS_BORDER | ES_AUTOHSCROLL, 220, 77, 50, 22, IDC_FPS_EDIT);
             mk(L"STATIC", L"Ris. (LxA):", 0, 285, 80, 85, 20, 0);
-            // GUI-only default of 640x480 (2026-07-05), lower than the library/CLI default
-            // (OpticalLinkConfig::camera_width/height = 1280x720) — requested specifically for GUI
-            // use, paired with the higher 30fps default above and WeChatQRCode below. Still fully
-            // editable per machine: type "max" to opt back into auto-detection, "0x0" to skip any
-            // request and leave the camera fully alone, or any other specific WxH.
+            // 640x480 (2026-07-05) — matches OpticalLinkConfig::camera_width/height, the
+            // library/CLI default too (paired with WeChatQRCode below; only the 30fps default
+            // above is GUI-only). Still fully editable per machine: type "max" to opt back into
+            // auto-detection, "0x0" to skip any request and leave the camera fully alone, or any
+            // other specific WxH.
             mk(L"EDIT", L"640x480", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
 
             mk(L"STATIC", L"QR per frame:", 0, 10, 106, 100, 20, 0);
@@ -243,12 +243,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // fast-changing on-screen content is a candidate, not a confirmed fix.
             mk(L"BUTTON", L"Blocca autofocus", BS_AUTOCHECKBOX, 10, 127, 160, 20, IDC_FOCUS_CHECK);
 
-            // Checked by default in the GUI as of 2026-07-05 (the library/CLI default in
-            // OpticalLinkConfig::use_wechat_qrcode stays false — this is a GUI-only preference,
-            // paired with the 640x480/30fps GUI defaults above), even though it's still untested on
-            // real camera hardware. Needs detect.prototxt/detect.caffemodel/sr.prototxt/
-            // sr.caffemodel in a "models/wechat_qrcode" folder next to this executable — see
-            // models/wechat_qrcode/LICENSE. Must match on both sides of the transfer.
+            // Checked by default (2026-07-05) — matches OpticalLinkConfig::use_wechat_qrcode, the
+            // library/CLI default too, though still not verified end-to-end on real camera
+            // hardware. Needs detect.prototxt/detect.caffemodel/sr.prototxt/sr.caffemodel in a
+            // "models/wechat_qrcode" folder next to this executable — see models/wechat_qrcode/
+            // LICENSE. Must match on both sides of the transfer.
             mk(L"BUTTON", L"Usa WeChatQRCode (CNN)", BS_AUTOCHECKBOX, 200, 127, 200, 20, IDC_WECHAT_CHECK);
             CheckDlgButton(hwnd, IDC_WECHAT_CHECK, BST_CHECKED);
 

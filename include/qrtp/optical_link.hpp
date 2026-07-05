@@ -21,22 +21,22 @@ struct OpticalLinkConfig {
     // Sender/Receiver ever calls set_fps(); the AIMD takes over from there.
     double fps = 3.0;
     QrEcLevel ec_level = QrEcLevel::M;
-    // Defaults to a fixed 1280x720 as of 2026-07-05, per real hardware testing across two separate
-    // machines that identified this (together with MJPEG on, autofocus left on, and the fps ramp-up
-    // starting from 3 — see AdaptiveConfig::fps_initial) as the best-performing combination found so
-    // far. This is a real, deliberate departure from the previous default (kAutoMaxResolution,
-    // requesting the camera's own highest available mode automatically): an earlier entry in
-    // not_working.md documented the exact same auto-max request negotiating cleanly to 1280x720 on
-    // one machine but to a different, worse-performing mode (1280x1024) on another — so "auto-max"
-    // itself was never a guaranteed-safe default, just an automatic one. 1280x720 is a genuine
-    // per-camera preference from real testing, not a universal law; still fully overridable — set
-    // both to kAutoMaxResolution to opt back into auto-detecting the camera's highest mode, both to
-    // 0 to leave the camera alone entirely (its own default, without any request), or any other
-    // positive WxH for a specific mode. The actual negotiated size a camera settles on (which can
-    // still differ from any of these) is always logged, never just assumed.
+    // Was 1280x720 (2026-07-05, per real hardware testing across two separate machines), then
+    // lowered to 640x480 (still 2026-07-05) to match a GUI-only preference the user later decided
+    // should be the library/CLI default too, paired with use_wechat_qrcode below. This is a real,
+    // deliberate departure from the even earlier default (kAutoMaxResolution, requesting the
+    // camera's own highest available mode automatically): an earlier entry in not_working.md
+    // documented the exact same auto-max request negotiating cleanly to 1280x720 on one machine but
+    // to a different, worse-performing mode (1280x1024) on another — so "auto-max" itself was never
+    // a guaranteed-safe default, just an automatic one. 640x480 is a genuine per-camera preference
+    // from real testing, not a universal law; still fully overridable — set both to
+    // kAutoMaxResolution to opt back into auto-detecting the camera's highest mode, both to 0 to
+    // leave the camera alone entirely (its own default, without any request), or any other positive
+    // WxH for a specific mode. The actual negotiated size a camera settles on (which can still
+    // differ from any of these) is always logged, never just assumed.
     static constexpr int kAutoMaxResolution = -1;
-    int camera_width = 1280;
-    int camera_height = 720;
+    int camera_width = 640;
+    int camera_height = 480;
     // Was briefly made false-by-default (2026-07-05) on the theory that JPEG compression artifacts
     // might be degrading QR module edges enough to explain a decode-reliability problem seen in a
     // real log. Reverted back to true after a direct controlled A/B on the *same* problematic
@@ -85,20 +85,24 @@ struct OpticalLinkConfig {
     // — see send_multi()/try_receive_multi() in optical_link.cpp, which are the *only* code this
     // touches; send()/try_receive() run the exact original code, unmodified, whenever this is 1.
     int qr_codes_per_frame = 1;
-    // Opt-in, default false — untested on real camera hardware (2026-07-05). When true, decodes
-    // using cv::wechat_qrcode::WeChatQRCode (opencv_contrib: a small SSD-style detector CNN plus a
-    // super-resolution enhancement step for small/blurry crops) instead of the classic
-    // cv::QRCodeDetector. Chosen over an alternative under consideration (zxing-cpp, a separate
-    // third-party library) specifically because it adds no new dependency or build pipeline: it's a
-    // module of the same OpenCV this project already links against, and the Windows cross-compile's
-    // system mingw64-opencv package already ships libopencv_wechat_qrcode + its libopencv_dnn
-    // dependency. The classic path (this flag false) is completely untouched — see
+    // Was opt-in/default false (2026-07-05, still untested on real camera hardware at the time),
+    // then promoted to the library/CLI default (still 2026-07-05) at the user's request, alongside
+    // the 640x480 default above. When true, decodes using cv::wechat_qrcode::WeChatQRCode
+    // (opencv_contrib: a small SSD-style detector CNN plus a super-resolution enhancement step for
+    // small/blurry crops) instead of the classic cv::QRCodeDetector. Chosen over an alternative
+    // under consideration (zxing-cpp, a separate third-party library) specifically because it adds
+    // no new dependency or build pipeline: it's a module of the same OpenCV this project already
+    // links against (the Windows cross-compile's custom-built OpenCV was extended with
+    // opencv_contrib's wechat_qrcode + dnn specifically for this — see not_working.md). The classic
+    // path (this flag false) remains fully available and completely untouched — see
     // wechat_qrcode_model_dir below for the 4 model files this needs that OpenCV itself doesn't
-    // bundle. Motivation: this project's whole session of real-hardware logs pointed at decode
-    // *reliability* (frames that never resolve, driving retries/downshifts), not raw per-attempt
-    // decode cost, as the dominant remaining bottleneck — a stronger detector attacks that directly,
-    // even though each attempt likely costs somewhat more CPU than the classical approach.
-    bool use_wechat_qrcode = false;
+    // bundle (shipped in dist-windows.zip under models/wechat_qrcode/). Motivation: this project's
+    // whole session of real-hardware logs pointed at decode *reliability* (frames that never
+    // resolve, driving retries/downshifts), not raw per-attempt decode cost, as the dominant
+    // remaining bottleneck — a stronger detector attacks that directly, even though each attempt
+    // likely costs somewhat more CPU than the classical approach. Still not verified end-to-end on
+    // real camera hardware as of this default flip.
+    bool use_wechat_qrcode = true;
     // Directory containing detect.prototxt, detect.caffemodel, sr.prototxt, sr.caffemodel (from
     // github.com/WeChatCV/opencv_3rdparty, branch wechat_qrcode — the canonical source
     // opencv_contrib's own wechat_qrcode module points at). Empty (default) resolves to a
