@@ -263,6 +263,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
+    // Must happen before any window (including this one) is created, or Windows may have already
+    // decided to bitmap-stretch/blur this process's windows on a scaled display.
+    SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     const wchar_t* kClassName = L"QrtpMainWindow";

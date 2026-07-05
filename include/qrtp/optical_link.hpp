@@ -34,6 +34,9 @@ private:
     void* capture_ = nullptr;  // cv::VideoCapture* (kept opaque so this header stays OpenCV-free)
     void* detector_ = nullptr; // cv::QRCodeDetector*
     std::vector<uint8_t> last_decoded_hash_;
+    int screen_w_ = 1000;
+    int screen_h_ = 1000;
+    int last_window_side_ = 0; // avoids re-resizing the window on every single frame
 };
 
 } // namespace qrtp

@@ -13,6 +13,10 @@
 #ifdef QRTP_WITH_OPENCV
 #include "qrtp/optical_link.hpp"
 #endif
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -170,6 +174,11 @@ int cmd_receive_optical(int argc, char** argv) {
 } // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // Must happen before any window is created, or Windows may bitmap-stretch/blur this process's
+    // windows on a scaled display — fatal for QR rendering specifically.
+    SetProcessDPIAware();
+#endif
     if (argc < 2) {
         print_usage();
         return 1;

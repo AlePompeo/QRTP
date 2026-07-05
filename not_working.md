@@ -6,6 +6,45 @@ session.
 
 ## Resolved
 
+### Camera never recognized the displayed QR at all; no ACK flashes ever seen on the receiver (2026-07-05)
+
+**Symptom**: pointing a camera at the sender's displayed QR, `cv::QRCodeDetector` never decoded
+anything — and consequently the receiver's screen never showed any outgoing QR flash either (SYN_ACK/
+SACK are only sent once a SYN has actually been decoded, so if decode never succeeds, the receiver
+never has anything to send back). "QR only ever appears on the transmitter" was a symptom of this,
+not a separate bug — the receiver's `send()` calls for ACKs simply never happened because it never
+got past waiting for a decodable SYN.
+
+**Most likely root cause**: no `SetProcessDPIAware()` (or manifest-based DPI declaration) anywhere
+in the app. On a display with Windows scaling enabled (125%/150% — the default on most modern
+laptops), an unaware process's windows get silently bitmap-stretched by the OS compositor, which
+blurs everything drawn, including a QR's module edges. A blurred QR is exactly the kind of input a
+QR decoder can't parse, regardless of camera distance/focus/lighting — this would explain a
+*complete, consistent* failure to decode rather than an intermittent one.
+
+**Also fixed at the same time**: the QR was rendered at a fixed `scale=8` pixels/module regardless
+of screen size, producing a fairly small on-screen image — small relative to typical camera-to-
+screen distances hurts decode reliability even without the blur issue.
+
+**Fix**:
+1. Call `SetProcessDPIAware()` as the very first thing in both `wWinMain` (GUI) and `main` (CLI) —
+   before any window is created, per Microsoft's guidance that DPI awareness must be declared
+   before window creation to take effect.
+2. `OpticalLink::send()` now computes an integer pixels-per-module scale so the rendered image
+   fills ~90% of the screen (queried via `GetSystemMetrics(SM_CXSCREEN/CYSCREEN)`), and resizes/
+   centers the display window to match exactly — sharp, pixel-exact rendering (no interpolation
+   blur from stretching a small bitmap into a big window), large but still a normal decorated
+   window (`WINDOW_NORMAL`), not OS-level fullscreen (`WND_PROP_FULLSCREEN`), per the user's
+   explicit request.
+
+**Not yet re-confirmed by the user** — this is a strong, plausible hypothesis (DPI virtualization
+blur is a well-known, common cause of exactly this "barcode/QR scanner app doesn't work at all on
+Windows" failure pattern) but wasn't something that could be directly observed/measured from this
+Linux dev environment. If the camera still can't decode after this fix, the next things to check
+(in order): whether Windows display scaling was actually the culprit (test at 100% scaling to
+isolate it), camera autofocus/exposure hunting on a static bright image, and physical screen
+brightness/glare.
+
 ### Receive mode: the camera window stopped responding and crashed (send worked fine) (2026-07-05)
 
 **Symptom** (real user report, on the v2 build after the OpenEXR fix): starting a transfer in
