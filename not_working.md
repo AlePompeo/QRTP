@@ -6,6 +6,43 @@ session.
 
 ## Resolved
 
+### Down to 35s from 97s after the rendering/grayscale fixes — added real timing diagnostics instead of guessing the next tuning constant (2026-07-05)
+
+**Context**: user confirmed the render + grayscale fixes helped a lot (97s → 35s) and believes the
+remaining bottleneck is entirely in the optical QR processing (render/capture/decode). That's a
+reasonable hypothesis given the history here, but it's still a guess — every previous *blind* guess
+in this specific area (chunk_size_max twice, the receiver-side fps mirroring twice) turned out
+wrong or made things worse once real hardware evidence came in. Rather than pick another constant
+to adjust without data, added the measurements needed to know which specific piece (QR encoding,
+rendering, camera capture, or `cv::QRCodeDetector`'s decode) is actually dominant.
+
+**Added**:
+- `OpticalLink::send()` now logs `encode_ms` (the `qr_encode_bytes`/libqrencode call) and
+  `render_ms` (the 1px/module build + `cv::resize`) alongside the existing per-frame "showing QR"
+  log line.
+- `OpticalLink::try_receive()` now accumulates capture time (`cap->read`) and decode time
+  (`detectAndDecode`) across every polling attempt since the last successful read, and logs the
+  averages (`avg_capture_ms`, `avg_decode_ms`, over `polls_since_last` attempts) on the existing
+  "camera read a NEW QR" log line — the only already-non-spammy log point in that hot loop, so this
+  adds real signal without adding new log volume (relevant after the v10 GUI-log-overflow bug).
+
+**Also**: throttled the local camera-preview `imshow()` in `try_receive()` to every 3rd captured
+frame — it's a usability aid (aiming the camera), not something decoding depends on, and imshow-ing
+every single frame from a fast camera is avoidable render cost in the same hot loop. `waitKey` and
+`detectAndDecode` still run on every captured frame (unchanged cadence), so this doesn't touch
+either the decode-latency path or the v3 anti-freeze fix (which depends on `waitKey` pumping
+messages every iteration, not on `imshow` specifically).
+
+**Next step**: once the user shares the next log with these fields populated, the actual split
+between render/capture/decode cost will be visible directly instead of inferred — that split
+determines whether the next lever is `chunk_size_max` again, camera capture resolution, or
+something in the decode path, instead of guessing among them.
+
+**Verified**: `make test` and the native (non-OpenCV) build pass; the OpenCV-enabled Windows
+cross-compile builds clean with these changes. Not verified against a real camera — there's no way
+to do that from this dev environment — so the timing numbers themselves are unconfirmed until the
+user's next real-hardware run.
+
 ### Large QR codes visibly lagging the whole app — a real O(width²) rendering cost, fixed directly instead of just tuned around (2026-07-05)
 
 **Symptom**: user report — large QR codes specifically make the whole app laggy; smaller QR codes

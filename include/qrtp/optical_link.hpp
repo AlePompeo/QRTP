@@ -55,6 +55,14 @@ private:
     int screen_w_ = 1000;
     int screen_h_ = 1000;
     int last_window_side_ = 0; // avoids re-resizing the window on every single frame
+    int preview_frame_counter_ = 0; // throttles the local camera-preview imshow (see try_receive)
+
+    // Accumulated since the last successful decode, so the "camera read a NEW QR" log line can
+    // report where the wall-clock time between one successful read and the next actually went
+    // (capture vs. decode) instead of leaving that a guess — see not_working.md, 2026-07-05.
+    double capture_ms_accum_ = 0.0;
+    double decode_ms_accum_ = 0.0;
+    int poll_count_since_last_decode_ = 0;
 };
 
 } // namespace qrtp

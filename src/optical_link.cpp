@@ -5,6 +5,7 @@
 #include <opencv2/opencv.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 
 #include "qrtp/base64.hpp"
@@ -67,12 +68,19 @@ void OpticalLink::set_fps(double fps) { cfg_.fps = fps; }
 void OpticalLink::set_ec_level(ECLevel level) { cfg_.ec_level = static_cast<QrEcLevel>(static_cast<uint8_t>(level)); }
 
 void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
+    using Clock = std::chrono::steady_clock;
+    auto ms_since = [](Clock::time_point t0) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    };
+
     // Base64 first: our protocol frames are dense binary (a SYN's seq field alone is four 0x00
     // bytes), and cv::QRCodeDetector's decode path isn't trustworthy with embedded NUL bytes —
     // see base64.hpp. Base64 text is pure printable ASCII, sidestepping the question entirely.
     const std::string encoded_text = base64_encode(frame_bytes);
     const std::vector<uint8_t> encoded_bytes(encoded_text.begin(), encoded_text.end());
+    const auto t_encode_start = Clock::now();
     const QrMatrix qr = qr_encode_bytes(encoded_bytes, cfg_.ec_level);
+    const double encode_ms = ms_since(t_encode_start);
     const int quiet = 4;
     const int modules_per_side = qr.width + 2 * quiet;
 
@@ -92,6 +100,7 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     // controller's tuning. INTER_NEAREST at an exact integer scale factor maps every destination
     // pixel back to one source module pixel, so this produces byte-identical output to the old
     // per-module fill — same sharp, blocky module edges, just built much cheaper.
+    const auto t_render_start = Clock::now();
     cv::Mat small(modules_per_side, modules_per_side, CV_8UC1, cv::Scalar(255));
     for (int y = 0; y < qr.width; ++y) {
         uint8_t* row = small.ptr<uint8_t>(y + quiet) + quiet;
@@ -101,6 +110,7 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     }
     cv::Mat img;
     cv::resize(small, img, cv::Size(side, side), 0, 0, cv::INTER_NEAREST);
+    const double render_ms = ms_since(t_render_start);
 
     if (side != last_window_side_) {
         // Large and centered, but still a normal decorated window (WINDOW_NORMAL, not
@@ -118,16 +128,25 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     if (cfg_.log) {
         cfg_.log("[optical] showing QR: version=" + std::to_string(qr.version) + " modules=" +
                   std::to_string(qr.width) + "x" + std::to_string(qr.width) + " module_px=" +
-                  std::to_string(scale) + " base64_len=" + std::to_string(encoded_text.size()));
+                  std::to_string(scale) + " base64_len=" + std::to_string(encoded_text.size()) +
+                  " encode_ms=" + std::to_string(encode_ms) + " render_ms=" + std::to_string(render_ms));
     }
     cv::waitKey(static_cast<int>(1000.0 / std::max(1.0, cfg_.fps)));
 }
 
 bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
+    using Clock = std::chrono::steady_clock;
+    auto ms_since = [](Clock::time_point t0) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    };
+
+    const auto deadline = Clock::now() + timeout;
+    while (Clock::now() < deadline) {
+        const auto t_capture_start = Clock::now();
         cv::Mat frame;
-        if (cap(capture_)->read(frame) && !frame.empty()) {
+        const bool got_frame = cap(capture_)->read(frame) && !frame.empty();
+        capture_ms_accum_ += ms_since(t_capture_start);
+        if (got_frame) {
             // QR content is pure black/white — nothing downstream needs the camera's color
             // channels. Converting once here (instead of leaving it to QRCodeDetector's own
             // internal conversion on a full 3-channel frame every single call) and reusing the
@@ -141,9 +160,16 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
             }
             // Live camera preview in its own window — helps the user aim the camera, and never
             // touches out_window_name_, so it can't stomp on whatever we're currently displaying
-            // to the other side.
-            cv::imshow(camera_window_name_, gray);
+            // to the other side. Throttled to every 3rd captured frame: it's a usability aid (aim
+            // the camera), not something detection depends on, and imshow-ing every single frame
+            // from a fast camera is real, avoidable render cost in this hot loop. detectAndDecode
+            // and the waitKey below still run on every frame — cadence of those is what actually
+            // matters for decode latency and for keeping the window responsive.
+            if (++preview_frame_counter_ % 3 == 0) cv::imshow(camera_window_name_, gray);
+            const auto t_decode_start = Clock::now();
             const std::string decoded_text = det(detector_)->detectAndDecode(gray);
+            decode_ms_accum_ += ms_since(t_decode_start);
+            ++poll_count_since_last_decode_;
             if (!decoded_text.empty()) {
                 const uint32_t h = crc32(reinterpret_cast<const uint8_t*>(decoded_text.data()), decoded_text.size());
                 const std::vector<uint8_t> hash_bytes = {uint8_t(h), uint8_t(h >> 8), uint8_t(h >> 16),
@@ -152,9 +178,16 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
                     last_decoded_hash_ = hash_bytes;
                     out = base64_decode(decoded_text);
                     if (cfg_.log) {
+                        const int n = std::max(1, poll_count_since_last_decode_);
                         cfg_.log("[optical] camera read a NEW QR: base64_len=" + std::to_string(decoded_text.size()) +
-                                  " decoded_bytes=" + std::to_string(out.size()));
+                                  " decoded_bytes=" + std::to_string(out.size()) + " polls_since_last=" +
+                                  std::to_string(poll_count_since_last_decode_) + " avg_capture_ms=" +
+                                  std::to_string(capture_ms_accum_ / n) + " avg_decode_ms=" +
+                                  std::to_string(decode_ms_accum_ / n));
                     }
+                    capture_ms_accum_ = 0.0;
+                    decode_ms_accum_ = 0.0;
+                    poll_count_since_last_decode_ = 0;
                     cv::waitKey(1);
                     return true;
                 }
