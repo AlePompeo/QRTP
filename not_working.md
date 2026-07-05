@@ -6,6 +6,34 @@ session.
 
 ## Resolved
 
+### One specific offset never got through no matter how much EC was raised — raising EC on a fixed-size stuck chunk makes its QR modules smaller, not more robust (2026-07-05)
+
+**Symptom**: with the previous two fixes in place, real diagnostic logs finally showed the optical
+channel genuinely working — the receiver's log showed offsets 0, 512, and 256 of a real file all
+successfully decoded (`camera read a NEW QR... DATA received: offset=... len=256`). But one specific
+offset (768, from the initial 4-frame handshake burst) never got through, cascading through every
+EC level up to H and still failing, hard-failing the whole transfer.
+
+**Root cause**: retransmitting a stuck offset always resends its *original* payload bytes (256
+bytes, from before any downshift) — confirmed by the diagnostic log's `showing QR` lines: `ec=M` at
+version 15 (module_px=11) succeeded for the other three offsets, but climbing to `ec=Q` (version
+18, module_px=10) and `ec=H` (version 20, module_px=9) for the stuck offset made its QR *larger and
+denser*, not smaller — because more error-correction redundancy for the *same* amount of source
+data needs more total codewords, hence more modules, hence smaller modules at our fixed
+90%-of-screen display size. Raising EC level was fighting itself: the "safer" setting was optically
+harder to resolve than the one that had just failed.
+
+**Fix**: when a stuck offset times out and the AIMD's current `chunk_size()` is smaller than that
+offset's original payload, split it into pieces matching the *current* (smaller) chunk size instead
+of blindly resending the original unchanged — each piece gets its own fresh retry budget. This
+means chunk size actually shrinks for a struggling offset (as intended) before EC level has to climb
+much, avoiding the smaller-modules-from-more-redundancy trap for anything that was queued early
+(i.e. before any downshift had happened yet), which is exactly the case that broke here.
+
+**Not yet re-confirmed by the user** — but this is the first fix in this whole debugging session
+backed by direct evidence (not inference) that the surrounding mechanism works: 3 of 4 offsets in
+the same file transfer attempt already succeeded before this fix.
+
 ### AIMD ec_level/fps were computed but never actually applied to the optical channel (2026-07-05)
 
 **Symptom**: real log from the user — even after manually forcing 1 fps (a full second of dwell

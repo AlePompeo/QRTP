@@ -223,31 +223,64 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
 
             if (advanced && !any_was_retried) adaptive_.record_clean_round();
         } else {
-            bool any_timeout = false;
+            std::vector<uint64_t> timed_out;
             for (auto& [off, info] : inflight) {
-                if (Clock::now() - info.sent_at > adaptive_.rto()) {
-                    if (++info.retries > cfg_.max_data_retries) {
-                        return {false, "max retransmit attempts exceeded at offset " + std::to_string(off)};
-                    }
-                    Frame rf;
-                    rf.type = FrameType::DATA;
-                    rf.session_id = session_id_;
-                    rf.seq = static_cast<uint32_t>(off);
-                    rf.flags_byte = flags::RETRANSMIT;
-                    if (off + info.bytes.size() >= filesize) rf.flags_byte |= flags::LAST_FRAME;
-                    rf.payload = info.bytes;
-                    // Apply the *current* adaptive settings even though this offset's payload is
-                    // stuck at whatever length it was first queued with — a downshifted EC level
-                    // and slower fps still make the exact same bytes meaningfully more likely to
-                    // decode, which matters a lot for an offset that's already failed once.
-                    link_.set_fps(adaptive_.fps());
-                    link_.set_ec_level(adaptive_.ec_level());
-                    link_.send(encode_frame(rf));
-                    info.sent_at = Clock::now();
-                    any_timeout = true;
-                }
+                if (Clock::now() - info.sent_at > adaptive_.rto()) timed_out.push_back(off);
             }
-            if (any_timeout) {
+
+            if (!timed_out.empty()) {
+                link_.set_fps(adaptive_.fps());
+                link_.set_ec_level(adaptive_.ec_level());
+
+                for (uint64_t off : timed_out) {
+                    auto it = inflight.find(off);
+                    if (it == inflight.end()) continue; // already resolved by a SACK this round
+
+                    const size_t current_chunk = adaptive_.chunk_size();
+                    if (it->second.bytes.size() > current_chunk) {
+                        // Resending this offset's original (larger) payload unchanged while only
+                        // raising the EC level is actually counterproductive: more redundancy for
+                        // the same amount of data needs a *bigger* QR, which — at a fixed on-screen
+                        // size — means smaller, harder-to-resolve modules, not easier. Split it into
+                        // pieces matching the current (smaller) chunk size instead, each getting its
+                        // own fresh retry budget.
+                        const std::vector<uint8_t> original_bytes = it->second.bytes;
+                        const uint64_t original_off = off;
+                        inflight.erase(it);
+                        log("splitting stuck offset " + std::to_string(original_off) + " (" +
+                            std::to_string(original_bytes.size()) + " bytes) into " +
+                            std::to_string(current_chunk) + "-byte pieces");
+                        for (size_t i = 0; i < original_bytes.size(); i += current_chunk) {
+                            const size_t len = std::min(current_chunk, original_bytes.size() - i);
+                            const uint64_t sub_off = original_off + i;
+                            std::vector<uint8_t> sub_bytes(original_bytes.begin() + static_cast<long>(i),
+                                                             original_bytes.begin() + static_cast<long>(i + len));
+                            Frame rf;
+                            rf.type = FrameType::DATA;
+                            rf.session_id = session_id_;
+                            rf.seq = static_cast<uint32_t>(sub_off);
+                            rf.flags_byte = flags::RETRANSMIT;
+                            if (sub_off + len >= filesize) rf.flags_byte |= flags::LAST_FRAME;
+                            rf.payload = sub_bytes;
+                            link_.send(encode_frame(rf));
+                            inflight[sub_off] = InFlight{sub_bytes, Clock::now(), 0};
+                        }
+                    } else {
+                        if (++it->second.retries > cfg_.max_data_retries) {
+                            return {false, "max retransmit attempts exceeded at offset " + std::to_string(off)};
+                        }
+                        Frame rf;
+                        rf.type = FrameType::DATA;
+                        rf.session_id = session_id_;
+                        rf.seq = static_cast<uint32_t>(off);
+                        rf.flags_byte = flags::RETRANSMIT;
+                        if (off + it->second.bytes.size() >= filesize) rf.flags_byte |= flags::LAST_FRAME;
+                        rf.payload = it->second.bytes;
+                        link_.send(encode_frame(rf));
+                        it->second.sent_at = Clock::now();
+                    }
+                }
+
                 adaptive_.record_loss_event();
                 log("retransmit — window=" + std::to_string(adaptive_.window_size()) +
                     " chunk=" + std::to_string(adaptive_.chunk_size()) +
