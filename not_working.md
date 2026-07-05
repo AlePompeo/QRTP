@@ -6,6 +6,38 @@ session.
 
 ## Resolved
 
+### AIMD ec_level/fps were computed but never actually applied to the optical channel (2026-07-05)
+
+**Symptom**: real log from the user — even after manually forcing 1 fps (a full second of dwell
+time per QR) in the GUI, offset 0 of the file *still* never got through, after cascading all the
+way to the AIMD's floor (window=1, chunk=32, EC=H) and hard-failing with `max retransmit attempts
+exceeded at offset 0`. The user forcing fps themselves and it still failing ruled out dwell time as
+the (remaining) bottleneck.
+
+**Root cause**: `adaptive_.ec_level()` and `adaptive_.fps()` were real, correctly-computed AIMD
+outputs — logged faithfully every retransmit — but nothing ever fed them back into the actual
+`OpticalLink` instance doing the rendering. `OpticalLink::send()` always used
+`OpticalLinkConfig::ec_level`/`fps`, fixed at construction time and never updated. So a log line
+reading `ec=H fps=1.0` was accurately describing the controller's internal state while the QR being
+rendered was still using the original `ec=M` the whole time — the "downshift" was real bookkeeping
+that never touched reality. Compounding this: a retransmitted offset always resends the exact bytes
+it was first queued with (`InFlight::bytes`, fixed at whatever `chunk_size()` was *when that offset
+was first sent*) — so an early offset like 0, first queued before any downshift, keeps resending its
+original (larger, denser) chunk forever regardless of how far `chunk_size()` has since dropped for
+*new* offsets. Between these two gaps, a stuck offset's retries were, in every way that actually
+matters optically, identical to its first failed attempt — no wonder retrying it dozens of times
+never helped.
+
+**Fix**: added `ILink::set_fps(double)` / `set_ec_level(ECLevel)` (default no-ops — `LoopbackLink`
+has no physical display and ignores them; only `OpticalLink` overrides them meaningfully, updating
+its `OpticalLinkConfig` in place). `Sender` now calls both before the handshake and before *every*
+`link_.send()` in the data phase — new frames and retransmits alike — so a stuck offset's EC level
+and display rate genuinely improve on each retry, even though its payload length itself stays
+fixed (re-chunking an already-inflight offset into smaller pieces would be the further fix if EC/fps
+alone turns out not to be enough — noted as the next lever, not yet implemented).
+
+**Not yet re-confirmed by the user.**
+
 ### Handshake eventually worked, but the data phase always failed (own camera activity stomped the outgoing QR) (2026-07-05)
 
 **Symptom**: real log from the user — `SYN` needed 5 attempts before a `SYN_ACK` came back, then

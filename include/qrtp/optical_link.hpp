@@ -36,6 +36,8 @@ public:
 
     void send(const std::vector<uint8_t>& frame_bytes) override;
     bool try_receive(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) override;
+    void set_fps(double fps) override;
+    void set_ec_level(ECLevel level) override;
 
 private:
     OpticalLinkConfig cfg_;

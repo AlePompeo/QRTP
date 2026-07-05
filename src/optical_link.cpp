@@ -62,6 +62,10 @@ OpticalLink::~OpticalLink() {
     cv::destroyWindow(camera_window_name_);
 }
 
+void OpticalLink::set_fps(double fps) { cfg_.fps = fps; }
+
+void OpticalLink::set_ec_level(ECLevel level) { cfg_.ec_level = static_cast<QrEcLevel>(static_cast<uint8_t>(level)); }
+
 void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     // Base64 first: our protocol frames are dense binary (a SYN's seq field alone is four 0x00
     // bytes), and cv::QRCodeDetector's decode path isn't trustworthy with embedded NUL bytes —

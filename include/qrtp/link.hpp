@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "qrtp/adaptive.hpp"
+
 namespace qrtp {
 
 // The physical/optical layer's contract: send a framed byte string outward, or try to receive one
@@ -19,6 +21,15 @@ public:
     virtual ~ILink() = default;
     virtual void send(const std::vector<uint8_t>& frame_bytes) = 0;
     virtual bool try_receive(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) = 0;
+
+    // Lets Sender push its AdaptiveController's current display parameters down to whatever the
+    // concrete link actually is. Default no-ops: LoopbackLink has no physical display, so there's
+    // nothing for it to do with these — only OpticalLink overrides them. Without this, the AIMD's
+    // computed ec_level()/fps() were purely cosmetic log values that never touched the actual
+    // rendered QR, which is exactly why a stuck offset never got any more robust across retries no
+    // matter how far the controller thought it had backed off.
+    virtual void set_fps(double) {}
+    virtual void set_ec_level(ECLevel) {}
 };
 
 struct LoopbackConfig {

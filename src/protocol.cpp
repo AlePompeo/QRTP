@@ -134,6 +134,8 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
     log("read " + std::to_string(filesize) + " bytes, SHA-256 " + sha256_hex(digest).substr(0, 12) + "...");
 
     // --- Handshake (3-way, like TCP) ---
+    link_.set_fps(adaptive_.fps());
+    link_.set_ec_level(adaptive_.ec_level());
     Frame syn;
     syn.type = FrameType::SYN;
     syn.session_id = session_id_;
@@ -179,6 +181,8 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
             f.flags_byte = (next_offset + len >= filesize) ? flags::LAST_FRAME : uint8_t(0);
             f.payload.assign(content.begin() + static_cast<long>(next_offset),
                               content.begin() + static_cast<long>(next_offset + len));
+            link_.set_fps(adaptive_.fps());
+            link_.set_ec_level(adaptive_.ec_level());
             link_.send(encode_frame(f));
             adaptive_.record_frame_sent();
             inflight[next_offset] = InFlight{f.payload, Clock::now(), 0};
@@ -232,6 +236,12 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
                     rf.flags_byte = flags::RETRANSMIT;
                     if (off + info.bytes.size() >= filesize) rf.flags_byte |= flags::LAST_FRAME;
                     rf.payload = info.bytes;
+                    // Apply the *current* adaptive settings even though this offset's payload is
+                    // stuck at whatever length it was first queued with — a downshifted EC level
+                    // and slower fps still make the exact same bytes meaningfully more likely to
+                    // decode, which matters a lot for an offset that's already failed once.
+                    link_.set_fps(adaptive_.fps());
+                    link_.set_ec_level(adaptive_.ec_level());
                     link_.send(encode_frame(rf));
                     info.sent_at = Clock::now();
                     any_timeout = true;
