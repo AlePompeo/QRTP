@@ -6,6 +6,53 @@ session.
 
 ## Resolved
 
+### Best-known real-hardware config confirmed: MJPEG on, autofocus on, 1280x720, fps ramping 3->24 (2026-07-05)
+
+**User report**: after testing the v38 toggles, the best-performing combination found on real
+hardware is MJPEG on (already the default), autofocus left on/not locked (already the default),
+resolution fixed at 1280x720, and fps effectively reaching ~24 — but explicitly *not* by hard-coding
+`fps_initial = 24`, which the user separately confirmed behaves differently (worse) than reaching 24
+by starting at 3 and letting it climb during the session. They asked for these settings to become
+the defaults and for a review of any further optimization opportunities.
+
+**On the fps point specifically**: this matches the project's own existing reasoning, not a new
+finding — `AdaptiveConfig::fps_initial = 3.0` exists precisely so the handshake and first few rounds
+happen before the camera's autofocus/auto-exposure has necessarily settled, and `upshift()`'s fps
+growth (`fps = min(fps_max, fps*1.4 + 0.5)`) reaches ~24-30 within roughly 5-6 clean upshift events
+from a starting point of 3 — which lines up with "it becomes fast soon after the program has been
+running for a bit." No code change needed here: this is the AIMD already doing its job, and
+confirms (rather than contradicts) the earlier decision to revert a hard-coded `fps_initial = 24`.
+
+**Fix**: changed `OpticalLinkConfig::camera_width`/`camera_height` defaults from
+`kAutoMaxResolution` (auto-detect the camera's highest mode) to a fixed `1280`/`720`. The GUI's
+resolution field now pre-fills "1280x720" instead of "max" to match. Both remain fully overridable
+(`--width -1 --height -1` / typing "max" opts back into auto-detection; `--width 0 --height 0` /
+"0x0" disables the request entirely; any other WxH requests that specific mode) — this default is a
+real per-camera preference from this user's testing, not a claim that it's universally optimal,
+consistent with the project's existing caution that the exact same "auto-max" request was already
+shown negotiating to a worse mode (1280x1024) on a different machine.
+
+**Other optimization opportunities reviewed, deliberately left unchanged**:
+- `chunk_size_max = 1024` sits well below what the current default EC level (M) or a lower one (L)
+  could actually encode (real ceiling ~1723 bytes at M, ~2191 at L, per
+  `max_chunk_for_ec_level()`/`kVersion40Capacity`) — so there's unused headroom on paper. Not
+  touched: this ceiling has a documented history of real regressions when raised (2048 caused a
+  severe render/decode lag reported earlier this session), specifically because larger QR versions
+  shrink module pixels at a fixed on-screen size — a decode-reliability risk, not just a math
+  question, and this session has no camera hardware to test whether that risk is still present at
+  the new 1280x720 baseline. Changing it now would be exactly the kind of speculative, unverified
+  change this project has repeatedly had to revert.
+- The background `CaptureThread` (overlapping capture with decode), thread priority bumps, and the
+  render loop's O(width) rebuild (vs. the old O(width²) per-module bug) were already addressed
+  earlier this session and remain unchanged — no new evidence suggests revisiting them.
+- `qr_codes_per_frame` (multi-QR-per-frame batching) remains off by default and untested on real
+  hardware — worth trying as the next throughput lever now that camera-level settings (MJPEG,
+  autofocus, resolution) are on a confirmed-good baseline, but not enabled by default since it's
+  still unverified.
+
+**Verified**: `make test`, a full loopback demo transfer (byte-for-byte identical + hash match),
+native build, and the Windows cross-compile (all three .exe targets) all build/pass cleanly.
+
 ### Added opt-in autofocus lock to test the still-open capture/decode latency correlation (2026-07-05)
 
 **Context**: the previous entry left an open question — in the MJPEG-off log, `avg_capture_ms` and

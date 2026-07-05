@@ -21,19 +21,22 @@ struct OpticalLinkConfig {
     // Sender/Receiver ever calls set_fps(); the AIMD takes over from there.
     double fps = 3.0;
     QrEcLevel ec_level = QrEcLevel::M;
-    // Defaults to kAutoMaxResolution (both), which requests the camera's own highest available
-    // mode automatically (see OpticalLink's constructor for how — OpenCV has no portable "list
-    // supported resolutions" API, so this asks for an intentionally oversized resolution and reads
-    // back whatever the driver actually clamps to). Set both to 0 to leave the camera alone
-    // entirely (its own default, without any request — see not_working.md, 2026-07-05, for why
-    // that's sometimes a conservative mode like 640x480), or to any other positive WxH to request a
-    // specific resolution instead. A real per-machine escape hatch either way: testing showed the
-    // exact same fixed-resolution request can be honored cleanly by one camera and remapped to a
-    // different, worse-performing mode by another — the actual negotiated size (which a camera can
-    // still override regardless of what's requested) is always logged, never just assumed.
+    // Defaults to a fixed 1280x720 as of 2026-07-05, per real hardware testing across two separate
+    // machines that identified this (together with MJPEG on, autofocus left on, and the fps ramp-up
+    // starting from 3 — see AdaptiveConfig::fps_initial) as the best-performing combination found so
+    // far. This is a real, deliberate departure from the previous default (kAutoMaxResolution,
+    // requesting the camera's own highest available mode automatically): an earlier entry in
+    // not_working.md documented the exact same auto-max request negotiating cleanly to 1280x720 on
+    // one machine but to a different, worse-performing mode (1280x1024) on another — so "auto-max"
+    // itself was never a guaranteed-safe default, just an automatic one. 1280x720 is a genuine
+    // per-camera preference from real testing, not a universal law; still fully overridable — set
+    // both to kAutoMaxResolution to opt back into auto-detecting the camera's highest mode, both to
+    // 0 to leave the camera alone entirely (its own default, without any request), or any other
+    // positive WxH for a specific mode. The actual negotiated size a camera settles on (which can
+    // still differ from any of these) is always logged, never just assumed.
     static constexpr int kAutoMaxResolution = -1;
-    int camera_width = kAutoMaxResolution;
-    int camera_height = kAutoMaxResolution;
+    int camera_width = 1280;
+    int camera_height = 720;
     // Was briefly made false-by-default (2026-07-05) on the theory that JPEG compression artifacts
     // might be degrading QR module edges enough to explain a decode-reliability problem seen in a
     // real log. Reverted back to true after a direct controlled A/B on the *same* problematic

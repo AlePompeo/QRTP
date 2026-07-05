@@ -205,13 +205,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             mk(L"STATIC", L"FPS:", 0, 175, 80, 40, 20, 0);
             mk(L"EDIT", L"3", WS_BORDER | ES_AUTOHSCROLL, 220, 77, 50, 22, IDC_FPS_EDIT);
             mk(L"STATIC", L"Ris. (LxA):", 0, 285, 80, 85, 20, 0);
-            // Pre-filled with "max" — the automatic default (see OpticalLinkConfig::
-            // kAutoMaxResolution): requests the camera's own highest available mode. Editable per
-            // machine: type a specific WxH (e.g. "1280x720") to request that instead, or "0x0" to
-            // skip any request and leave the camera fully alone — real hardware testing showed the
-            // exact same fixed-resolution request can be honored cleanly by one camera and remapped
-            // to a worse mode by another.
-            mk(L"EDIT", L"max", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
+            // Pre-filled with "1280x720" (see OpticalLinkConfig::camera_width/camera_height): real
+            // hardware testing across two machines found this the best-performing fixed resolution,
+            // ahead of "max" (auto-detecting the camera's own highest mode) — which an earlier test
+            // showed negotiating cleanly to 1280x720 on one machine but to a worse mode on another.
+            // Still fully editable per machine: type "max" to opt back into auto-detection, "0x0" to
+            // skip any request and leave the camera fully alone, or any other specific WxH.
+            mk(L"EDIT", L"1280x720", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
 
             mk(L"STATIC", L"QR per frame:", 0, 10, 106, 100, 20, 0);
             // Classic default "1" — exactly the original single-QR-at-a-time behavior. >1 is the
