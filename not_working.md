@@ -6,6 +6,44 @@ session.
 
 ## Resolved
 
+### The "fix" for the previous regression made throughput twice as bad — mirroring the sender's fps onto the receiver defeats a manually-configured fast receiver (2026-07-05)
+
+**Symptom**: real user report on the v17 build (rate-mirroring fix) — throughput got *worse*, not
+better: 97s, up from the already-bad 47.24s the mirroring was meant to fix.
+
+**Root cause**: v17 made every `DATA` frame carry the sender's current fps/EC level and had the
+receiver apply it directly to its own reverse (SACK) channel. This looked strictly safer than the
+v14 approach (reusing a rate the forward channel had already proven, instead of a separate guess)
+— but it missed something more basic: the *sender's* fps starts low (`fps_initial=3.0`) and only
+climbs gradually via AIMD over many clean rounds (~12 upshift events to approach `fps_max`). Before
+any of this optimization work existed, the receiver's reverse channel ran at whatever fps the user
+configured for *that side* — completely independent of the sender's ramp-up curve. If the user set
+a high fps on the receiving side too (as this user had — see the "48 vs 60" report), that channel
+used to run fast the *entire* time. Mirroring throws that away: it forcibly holds the receiver's
+channel down to match the sender's own (still-ramping, possibly never-fully-ramped for a short
+file) fps, on every single frame — actively defeating a manually-configured fast receiver rather
+than helping a slow one. For a small file that completes before the sender's AIMD ever reaches its
+ceiling, this makes the receiver strictly slower than before the "fix," which matches the reported
+2x regression.
+
+**Fix**: removed the mirroring entirely (`encode_rate_hint`/`decode_fps_hint`/`decode_ec_hint` and
+all call sites) along with the v14 independent-controller approach it had replaced. `Receiver` is
+now back to exactly its pre-optimization-pass behavior: its link's fps/EC level is whatever it was
+constructed with (the user's own `--fps`/GUI setting for that side), untouched by anything the
+sender reports. Two consecutive attempts at automatically tuning the reverse channel's speed each
+made real-hardware throughput measurably worse — the safe, evidence-respecting move is to stop
+touching this dimension automatically and leave it under direct user control, exactly as it was
+before any of this session's throughput work started.
+
+**Practical implication for the user**: since the reverse channel no longer self-tunes, make sure
+the *receiving* side's `--fps` (CLI) or FPS field (GUI) is also set high if fast transfers matter —
+setting it only on the sending side no longer has any effect on how fast SACKs come back.
+
+**Verified**: `make test` and a full loopback demo transfer (byte-for-byte + hash match) both pass.
+`protocol.hpp` is now byte-identical to its pre-optimization-pass state (commit `9afdf53`); the only
+remaining diff in `protocol.cpp` against that baseline is the unrelated size/duration logging added
+separately (and not implicated in either regression).
+
 ### Still very slow after the chunk_size_max revert — 13110 bytes in 47.24s at fps=48 despite fps_max=60 — the receiver's own reverse-channel AIMD was penalizing itself for forward-channel loss (2026-07-05)
 
 **Symptom**: real user report on the v16 build (chunk_size_max already reverted to 1500) — a

@@ -1,7 +1,6 @@
 #include "qrtp/protocol.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -86,22 +85,6 @@ uint16_t random_session_id() {
     static std::uniform_int_distribution<int> dist(1, 0xFFFF);
     return static_cast<uint16_t>(dist(rng));
 }
-
-// Piggybacks the sender's current AIMD fps/EC level on every DATA frame, in fields that carry no
-// other meaning for that frame type: `ack_window` (unused by DATA — only SYN/SACK give it meaning)
-// as fps*100 fixed-point, and the otherwise-unused upper two bits of `flags_byte` for EC level
-// (0-3, fits in 2 bits). Lets the receiver mirror the forward channel's already-proven-good rate
-// for its own reverse (SACK) channel directly, instead of trying to infer reverse-channel health
-// from a separate, weaker signal (see the reverted receiver-side AdaptiveController: a DATA
-// retransmit is just as often caused by forward-channel loss as by a lost SACK, so penalizing the
-// reverse channel for it was frequently wrong and made things much slower, not faster).
-void encode_rate_hint(Frame& f, double fps, ECLevel ec) {
-    f.ack_window = static_cast<uint32_t>(std::llround(fps * 100.0));
-    f.flags_byte = static_cast<uint8_t>(f.flags_byte | (static_cast<uint8_t>(ec) << 4));
-}
-
-double decode_fps_hint(const Frame& f) { return static_cast<double>(f.ack_window) / 100.0; }
-ECLevel decode_ec_hint(const Frame& f) { return static_cast<ECLevel>((f.flags_byte >> 4) & 0x03); }
 
 } // namespace
 
@@ -199,7 +182,6 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
             f.flags_byte = (next_offset + len >= filesize) ? flags::LAST_FRAME : uint8_t(0);
             f.payload.assign(content.begin() + static_cast<long>(next_offset),
                               content.begin() + static_cast<long>(next_offset + len));
-            encode_rate_hint(f, adaptive_.fps(), adaptive_.ec_level());
             link_.set_fps(adaptive_.fps());
             link_.set_ec_level(adaptive_.ec_level());
             link_.send(encode_frame(f));
@@ -286,7 +268,6 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
                             rf.flags_byte = flags::RETRANSMIT;
                             if (sub_off + len >= filesize) rf.flags_byte |= flags::LAST_FRAME;
                             rf.payload = sub_bytes;
-                            encode_rate_hint(rf, adaptive_.fps(), adaptive_.ec_level());
                             link_.send(encode_frame(rf));
                             inflight[sub_off] = InFlight{sub_bytes, Clock::now(), 0};
                         }
@@ -301,7 +282,6 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
                         rf.flags_byte = flags::RETRANSMIT;
                         if (off + it->second.bytes.size() >= filesize) rf.flags_byte |= flags::LAST_FRAME;
                         rf.payload = it->second.bytes;
-                        encode_rate_hint(rf, adaptive_.fps(), adaptive_.ec_level());
                         link_.send(encode_frame(rf));
                         it->second.sent_at = Clock::now();
                     }
@@ -395,9 +375,6 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
         }
     };
 
-    // Doesn't touch link_'s fps/EC level itself — that's kept in sync with whatever the sender's
-    // DATA frames report (see the DATA branch below), so every send_sack() here just uses whatever
-    // rate was most recently mirrored from the sender.
     auto send_sack = [&] {
         std::vector<std::pair<uint64_t, uint32_t>> ranges;
         for (const auto& [off, bytes] : chunks) {
@@ -427,14 +404,6 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
                 continue;
             }
             if (f->type == FrameType::DATA) {
-                // Mirror the sender's current fps/EC level onto our own reverse (SACK) channel —
-                // a rate the forward channel has already just proven works on this exact
-                // camera/lighting setup, and a SACK's payload is smaller besides. Directly reusing
-                // it sidesteps needing our own inference about reverse-channel health at all.
-                const double sender_fps = decode_fps_hint(*f);
-                if (sender_fps > 0.0) link_.set_fps(sender_fps);
-                link_.set_ec_level(decode_ec_hint(*f));
-
                 log("DATA received: offset=" + std::to_string(f->seq) + " len=" + std::to_string(f->payload.size()) +
                     " cumulative_before=" + std::to_string(cumulative));
                 if (static_cast<uint64_t>(f->seq) >= cumulative) {
