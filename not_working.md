@@ -6,6 +6,36 @@ session.
 
 ## Resolved
 
+### Camera lags badly at high resolution in this app but not in Windows' own Camera app — OpenCV was capturing raw/uncompressed instead of MJPEG (2026-07-05)
+
+**Symptom**: real user report — the camera lags a lot in this program specifically at higher
+resolutions, but not when opened at the same resolution in Windows' native Camera app.
+
+**Root cause**: this is the textbook symptom of a USB webcam being driven in a raw/uncompressed
+capture mode instead of MJPEG. A 1080p raw YUY2 frame is ~4MB — at any real frame rate that
+exceeds what USB can sustain (especially USB 2.0), so the camera/driver ends up throttling or
+stalling to cope. Native camera apps (Windows' included) request MJPEG — hardware-compressed by
+the camera's own sensor/ISP, roughly 10-20x smaller per frame — for exactly this reason once
+resolution climbs past a low threshold. OpenCV's DirectShow (`cv::CAP_DSHOW`) backend doesn't do
+this automatically; it was left to negotiate whatever pixel format it defaults to for the
+requested resolution, which at the higher resolutions this app now requests by default (see the
+auto-max-resolution entry above) can mean raw capture and the exact lag described.
+
+**Fix**: `OpticalLink`'s constructor now explicitly requests `cv::CAP_PROP_FOURCC` =
+`'MJPG'`, set before the resolution request (some backends only unlock a camera's higher-
+resolution modes once the pixel format is already negotiated). Unlike the resolution request
+itself, this isn't made opt-in — MJPEG is the near-universal standard high-resolution capture mode
+for UVC webcams specifically because of this USB bandwidth constraint, not a per-camera quirk; a
+camera lacking it would already struggle to offer high resolutions in any application, native or
+not. Also added the negotiated FOURCC to the existing "camera opened: resolution ..." log line (a
+`set()` request can be silently ignored by a camera/driver that doesn't support it, same caveat as
+the resolution request — this reports what's actually in effect, not just what was asked for).
+
+**Verified**: `make test`, native build, and the OpenCV-enabled Windows cross-compile all
+pass/build cleanly. **Not verified on real hardware** — same caveat as every camera-facing change
+in this log; the negotiated `fourcc=...` log field is exactly what to check on the next real
+transfer to confirm this took effect.
+
 ### Experimental multi-QR-per-frame mode, added as a runtime toggle instead of a hard swap (2026-07-05)
 
 User asked whether showing 2+ QR codes on screen at once (instead of one at a time) could help

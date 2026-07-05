@@ -134,6 +134,21 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
     // doesn't honor is simply ignored, same as any other capability request here.
     cap(capture_)->set(cv::CAP_PROP_BUFFERSIZE, 1);
 
+    // Requests MJPEG explicitly — real user report: the camera lags badly at higher resolutions
+    // in this app specifically, but not when opened at the same resolution in Windows' own Camera
+    // app. That's the textbook symptom of a USB webcam being driven in a raw/uncompressed capture
+    // mode: a 1080p raw YUY2 frame is ~4MB, which at any real frame rate exceeds what USB can
+    // sustain, so the camera/driver ends up throttling or stalling. Most native camera apps
+    // request MJPEG (hardware-compressed by the camera itself, ~10-20x smaller per frame) for
+    // exactly this reason at anything beyond low resolutions; OpenCV's DirectShow backend doesn't
+    // do this automatically unless asked. Set before the resolution request below, since some
+    // backends only unlock a camera's higher-resolution modes once the pixel format is already
+    // negotiated. Unlike the resolution request itself, this isn't made opt-in: MJPEG is the
+    // near-universal standard high-resolution capture mode for UVC webcams specifically because of
+    // this exact USB bandwidth constraint, not a per-camera quirk — a camera without it would
+    // already struggle to offer high resolutions in any app, native or not.
+    cap(capture_)->set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+
     // Three modes, by default requesting the camera's highest available mode automatically
     // (kAutoMaxResolution): OpenCV's base VideoCapture interface has no portable "list supported
     // resolutions" call (that's backend-specific, e.g. DirectShow's IAMStreamConfig, real COM
@@ -165,9 +180,14 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
         // Always reports what the camera actually negotiated, not just what (if anything) was
         // requested — a set() request can be silently ignored or remapped by the driver, so this
         // is the only way to know what's really in effect.
+        const int fourcc = static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FOURCC));
+        const char fourcc_chars[5] = {static_cast<char>(fourcc & 0xFF), static_cast<char>((fourcc >> 8) & 0xFF),
+                                       static_cast<char>((fourcc >> 16) & 0xFF), static_cast<char>((fourcc >> 24) & 0xFF),
+                                       '\0'};
         cfg_.log("[optical] camera opened: resolution " +
                   std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_WIDTH))) + "x" +
-                  std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_HEIGHT))) + requested_desc);
+                  std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_HEIGHT))) + requested_desc +
+                  " fourcc=" + std::string(fourcc_chars));
     }
 
     capture_thread_ = new CaptureThread(cap(capture_));
