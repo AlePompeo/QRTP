@@ -212,9 +212,7 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
             const bool advanced = new_cumulative > cumulative_acked;
             cumulative_acked = std::max(cumulative_acked, new_cumulative);
 
-            const auto sack_ranges = parse_sack_ranges(f->payload);
-            uint64_t high_water = new_cumulative;
-            for (const auto& range : sack_ranges) {
+            for (const auto& range : parse_sack_ranges(f->payload)) {
                 auto it = inflight.find(range.first);
                 if (it != inflight.end()) {
                     adaptive_.on_rtt_sample(
@@ -222,21 +220,6 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
                     if (it->second.retries > 0) any_was_retried = true;
                     inflight.erase(it);
                 }
-                high_water = std::max<uint64_t>(high_water, static_cast<uint64_t>(range.first) + range.second);
-            }
-
-            // TCP-style fast retransmit: this SACK proves the receiver already has something
-            // *ahead* of an offset still sitting unacked in our own inflight map. On a general IP
-            // network that could just be reordering, which is why TCP waits for several
-            // corroborating duplicate ACKs before acting on it — but this channel has no multi-path
-            // reordering (one SACK per DATA frame, essentially in display order), so a single gap
-            // like this is already a reliable loss signal on its own. Backdating sent_at reuses the
-            // exact same, already-tested RTO-timeout retransmit path below instead of duplicating
-            // it — the gapped offset gets retransmitted on the very next poll instead of waiting out
-            // a full RTO, which at a fast fps can be many multiples of the actual round-trip time
-            // for what's often just one isolated miss (see not_working.md, 2026-07-05).
-            for (auto& [off, info] : inflight) {
-                if (off < high_water) info.sent_at = Clock::now() - adaptive_.rto() - std::chrono::milliseconds(1);
             }
 
             if (advanced && !any_was_retried) adaptive_.record_clean_round();

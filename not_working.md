@@ -6,6 +6,52 @@ session.
 
 ## Resolved
 
+### Throughput got much worse after fps=24 + fast retransmit shipped together — found a real design flaw in fast retransmit, reverted it (2026-07-05)
+
+**Symptom**: real user report — transfer speed got a lot worse, unsure whether the new MJPEG
+capture request or the fast-retransmit change from the same session was responsible.
+
+**Analysis (no diagnostic log available, reasoned from the code)**: re-examined the fast-retransmit
+mechanism (added alongside fps=24 in the same commit) and found a real flaw I'd argued past too
+quickly when I wrote it. The justification at the time was "this channel has no multi-path
+reordering like general IP networks do, so a single SACK gap is already reliable evidence of loss,
+unlike TCP which needs several duplicate ACKs first." That's true for *network*-path reordering —
+but it misses a different, real source of apparent reordering *specific to this channel*: two QR
+codes can take genuinely different amounts of time to capture and decode (motion blur, a marginal
+focus moment, an awkward angle on just one of them), so a later offset can legitimately get decoded
+before an earlier one *without the earlier one being lost at all* — just slower to resolve. Treating
+every such gap as confirmed loss, on the very first observation, retransmits offsets that might have
+arrived on their own moments later.
+
+That extra retransmit isn't just wasted — it counts toward `severity` in
+`record_loss_event(severity)`, which downshifts window/chunk/fps. Combined with fps=24 (raised in
+the *same* commit): a faster display rate means more capture attempts per unit time, which means
+more opportunities for this specific kind of transient, non-lost gap to appear, which (with no
+corroboration requirement) means more self-inflicted "loss events" triggering AIMD downshifts that
+wouldn't have fired at all under the original, more patient RTO-based-only retransmit logic. This
+is a plausible, mechanism-level explanation for a real, significant slowdown — exactly matching
+what was reported — rather than something MJPEG capture (a real but separate change from the same
+release) obviously explains as cleanly.
+
+**Fix**: reverted the fast-retransmit logic in `Sender::send_file()` (`protocol.cpp`) back to pure
+RTO-timeout-based retransmission — the same code as before v31's fast-retransmit addition.
+`fps_initial`/`OpticalLinkConfig::fps` stay at 24 (the user hasn't flagged fps itself as an issue,
+and it's an independent change with its own, separate rationale). The MJPEG capture request (v33)
+is left as-is for now — deliberately, as a controlled comparison: if throughput recovers with just
+this revert, fast retransmit was the (or a major) cause; if it's still slow, MJPEG becomes the next
+thing to reconsider, and now there's a real basis for whether it was one, the other, or both,
+instead of reverting everything from this session at once and learning nothing.
+
+**If fast retransmit is revisited later**: the fix would be to require corroboration before acting
+— e.g., only retransmit early once the same gap has persisted across 2-3 consecutive SACKs, or only
+once a minimum fraction of the RTO has already elapsed for that specific offset — closer to what
+TCP itself actually does (duplicate-ACK counting), rather than acting on the very first observation
+of an ambiguous signal.
+
+**Verified**: `make test`, a full loopback demo transfer (byte-for-byte + hash match), native build,
+and the OpenCV-enabled Windows cross-compile all pass/build cleanly, matching the pre-fast-
+retransmit baseline (protocol.cpp's SACK-handling code is now identical to before v31).
+
 ### Camera lags badly at high resolution in this app but not in Windows' own Camera app — OpenCV was capturing raw/uncompressed instead of MJPEG (2026-07-05)
 
 **Symptom**: real user report — the camera lags a lot in this program specifically at higher
