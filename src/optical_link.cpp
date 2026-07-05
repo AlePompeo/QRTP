@@ -112,12 +112,14 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
         throw std::runtime_error("OpticalLink: cannot open camera index " + std::to_string(cfg_.camera_index));
     }
 
-    // Only requests a resolution if the caller explicitly opted in (camera_width/height > 0) —
-    // real two-machine hardware data showed forcing one automatically for everyone is unsafe: the
-    // exact same request (1280x720) was honored cleanly by one machine's camera and silently
-    // remapped to a different, worse-performing mode by the other's. Left as an explicit,
-    // per-machine choice instead (CLI --width/--height or the GUI's fields), so someone can try it
-    // on their own specific hardware without it being forced on hardware where it might backfire.
+    // Requests a resolution whenever both dimensions are positive — true by default (1280x720,
+    // see OpticalLinkConfig), since OpenCV's DirectShow backend otherwise tends to settle for a
+    // conservative default (often 640x480) well below what the camera actually supports. Real
+    // two-machine hardware data showed the exact same request can be honored cleanly by one
+    // camera and remapped to a different, worse-performing mode by another, so CLI --width/--height
+    // (or the GUI's field) let this be overridden per machine — including to 0x0, which skips the
+    // request entirely and leaves the camera fully alone, for hardware where forcing anything
+    // backfires.
     if (cfg_.camera_width > 0 && cfg_.camera_height > 0) {
         cap(capture_)->set(cv::CAP_PROP_FRAME_WIDTH, cfg_.camera_width);
         cap(capture_)->set(cv::CAP_PROP_FRAME_HEIGHT, cfg_.camera_height);

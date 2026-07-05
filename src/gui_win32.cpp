@@ -199,14 +199,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             mk(L"STATIC", L"FPS:", 0, 175, 80, 40, 20, 0);
             mk(L"EDIT", L"3", WS_BORDER | ES_AUTOHSCROLL, 220, 77, 50, 22, IDC_FPS_EDIT);
             mk(L"STATIC", L"Ris. (LxA):", 0, 285, 80, 85, 20, 0);
-            // Blank by default = leave the camera's own resolution alone (see OpticalLinkConfig —
-            // forcing one automatically was tried and helped one camera while hurting another on
-            // real hardware). Opt-in: fill in e.g. "1280x720" to try a specific one on this
-            // machine. The log's "camera opened: resolution ..." line reports whatever the
-            // camera/driver negotiates when this is left blank — on some hardware that's a
-            // conservative default like 640x480 even though the camera supports much more; this
-            // field is exactly how to ask for higher instead of assuming the default is the max.
-            mk(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
+            // Pre-filled with 1280x720 — the automatic default (see OpticalLinkConfig): OpenCV's
+            // DirectShow backend otherwise tends to settle for a conservative default (often
+            // 640x480) well below what the camera actually supports. Editable per machine: type a
+            // different WxH to try that instead, or "0x0" to skip the request entirely and leave
+            // the camera fully alone — real hardware testing showed the exact same request can be
+            // honored cleanly by one camera and remapped to a worse mode by another.
+            mk(L"EDIT", L"1280x720", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
 
             mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 115, 100, 28, IDC_START_BTN);
             HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 115, 100, 28, IDC_STOP_BTN);

@@ -6,6 +6,31 @@ session.
 
 ## Resolved
 
+### Made 1280x720 the automatic default again, with manual override still available (2026-07-05)
+
+After the previous entry explained *why* the camera defaults to 640x480 without a request, the
+user clarified what they actually wanted: automatic high-resolution behavior *by default* (like
+before it was reverted), plus the manual per-machine override on top — not manual-only. Both at
+once, not one or the other.
+
+**Change**: `OpticalLinkConfig::camera_width`/`camera_height` now default to `1280`/`720` instead
+of `0`/`0`. The GUI's "Ris. (LxA)" field is now pre-filled with `1280x720` instead of blank; the
+CLI's `--width`/`--height` flags simply override this default same as before. To fully disable
+the request on a specific machine (if it turns out to be one where forcing anything backfires, as
+happened in the v21/v22 saga), pass `--width 0 --height 0` or clear the GUI field to `0x0` — the
+existing "only request if both > 0" check already treats that as "leave the camera alone,"
+requiring no new logic, just a new default value.
+
+This knowingly re-accepts the specific risk documented in the v21/v22 entries above (the exact
+same request can help one camera and hurt another) — the user was already shown that evidence
+directly and asked for the automatic-by-default behavior back anyway, so this is an informed
+choice, not a re-guess. The manual escape hatch (0x0, or any other WxH) is what makes it
+recoverable per-machine if needed, rather than an unconditional, un-overridable default like the
+original v21 attempt was.
+
+**Verified**: `make test`, native build, and the OpenCV-enabled Windows cross-compile all build
+and pass cleanly.
+
 ### After making resolution opt-in, the camera always opens at 640x480 — not a bug, OpenCV/DirectShow's own conservative default (2026-07-05)
 
 **Symptom**: user report right after the resolution field became opt-in (blank = don't touch

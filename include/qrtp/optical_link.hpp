@@ -17,14 +17,16 @@ struct OpticalLinkConfig {
     // algorithm lock on; 10fps (100ms/frame) proved too fast for real hardware in testing.
     double fps = 3.0;
     QrEcLevel ec_level = QrEcLevel::M;
-    // 0 (default) means "don't ask" — leave the camera at whatever resolution it opens with. Real
-    // two-machine testing showed forcing a resolution automatically for everyone is unsafe: the
-    // exact same request (1280x720) was honored cleanly by one machine's camera and silently
-    // remapped to a different, worse-performing mode by the other's. Opt-in only, per machine —
-    // set both to a positive value to request it; the actual negotiated size (which a camera can
-    // still override) is always logged so what really happened is never just assumed.
-    int camera_width = 0;
-    int camera_height = 0;
+    // Defaults to requesting 1280x720 automatically — OpenCV's DirectShow backend otherwise tends
+    // to negotiate a conservative default (often 640x480) regardless of what the camera actually
+    // supports (see not_working.md, 2026-07-05). Set either to 0 (or both) to leave the camera
+    // alone entirely, or to any other positive WxH to request a specific resolution instead — a
+    // real per-machine escape hatch, since testing showed the exact same request can be honored
+    // cleanly by one camera and remapped to a different, worse-performing mode by another. The
+    // actual negotiated size (which a camera can still override regardless of what's requested) is
+    // always logged, so what really happened is never just assumed.
+    int camera_width = 1280;
+    int camera_height = 720;
     // Optional diagnostics from the optical layer itself (distinct from ProtocolConfig::log):
     // whether the camera is detecting any QR content at all, and whether decoded text survives
     // frame validation. Wire it to the same sink as ProtocolConfig::log to see both in one place —
