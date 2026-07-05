@@ -37,13 +37,51 @@ screen distances hurts decode reliability even without the blur issue.
    window (`WINDOW_NORMAL`), not OS-level fullscreen (`WND_PROP_FULLSCREEN`), per the user's
    explicit request.
 
-**Not yet re-confirmed by the user** — this is a strong, plausible hypothesis (DPI virtualization
-blur is a well-known, common cause of exactly this "barcode/QR scanner app doesn't work at all on
-Windows" failure pattern) but wasn't something that could be directly observed/measured from this
-Linux dev environment. If the camera still can't decode after this fix, the next things to check
-(in order): whether Windows display scaling was actually the culprit (test at 100% scaling to
-isolate it), camera autofocus/exposure hunting on a static bright image, and physical screen
-brightness/glare.
+**UPDATE**: the DPI/size fix alone did *not* resolve it — user confirmed the QR still wasn't
+recognized even on the very first SYN attempt, after re-testing. That "fails from the very first
+frame, every time" pattern pointed away from a physical/optical explanation (which would tend to be
+intermittent) and toward something structurally wrong in the decode pipeline. See the Base64 fix
+below, which addresses a much more likely root cause found on closer inspection.
+
+### QR decode failing from the very first frame, every time: binary payload probably truncated at an embedded NUL (2026-07-05)
+
+**Symptom**: even after the DPI-awareness and large/sharp-rendering fix above, the camera still
+never recognized the very first QR shown (the sender's `SYN`) — not intermittently, every single
+time.
+
+**Root cause (best available diagnosis, not directly observable from this Linux dev environment)**:
+QRTP's frames are dense binary data, not text — and are riddled with embedded zero bytes by
+construction (e.g. a `SYN` frame's 4-byte `seq` field, always `0x00 0x00 0x00 0x00` since it's
+unused for that frame type; `ack_window` for a small window size like 4 is mostly zero bytes too).
+`cv::QRCodeDetector::detectAndDecode()` returns a `std::string`, and it is a known, common
+limitation of QR/barcode decoder APIs built around C-string-style string handling to silently
+truncate the decoded content at the first embedded `0x00` — treating binary data as if it were a
+null-terminated C string. For a `SYN` frame specifically, that first zero byte arrives very early
+(inside the header, well before the filename/size/hash payload), so the decoded string would come
+back drastically truncated — short enough that `decode_frame()`'s size/CRC checks would reject it
+outright as malformed, every single time, with no dependence on camera quality, lighting, or
+distance. This fits the reported symptom far better than any physical/optical explanation.
+
+**Fix**: stopped trusting any QR/barcode decoder's string handling to be binary-transparent.
+`OpticalLink::send()` now Base64-encodes the frame bytes before generating the QR (`base64.cpp`,
+new); `OpticalLink::try_receive()` Base64-decodes the detector's returned text after reading it.
+Base64 output is pure printable ASCII with no embedded NUL ever, which sidesteps the question of
+whether any particular decoder's internals are fully binary-safe — it doesn't matter anymore.
+Costs ~33% more QR payload per byte of actual frame data (an acceptable, deliberate trade for
+correctness — the alternative, hex encoding, would cost 100% for a marginal simplicity gain).
+
+**Verified**: round-trip correctness of the Base64 implementation itself, thoroughly — RFC 4648's
+standard test vectors, an explicit round-trip of binary data containing multiple embedded zero
+bytes (the exact scenario hypothesized to break `cv::QRCodeDetector`), and all 65 lengths from 0 to
+64 bytes of random data (catches off-by-one padding bugs). All pass (`make test`, native Linux
+build). **Not yet verified**: that this actually fixes the real camera-to-screen decode failure —
+the hypothesis is well-reasoned and specific (explains "fails from frame one, always," which a
+physical/optical cause typically wouldn't), but this project has no way to directly drive a camera
+against a real QR-rendering OpenCV window from this dev environment, so real-world confirmation is
+still pending. If the camera *still* can't decode after this fix, the failure mode is not what's
+diagnosed here — worth checking next: does `render-qr`'s output (a known-good QR, generated the
+same way, saved to a file) scan correctly with an unrelated QR reader app (e.g. a phone) at all,
+which would isolate whether the QR *generation* itself is sound independent of OpenCV's decoder.
 
 ### Receive mode: the camera window stopped responding and crashed (send worked fine) (2026-07-05)
 

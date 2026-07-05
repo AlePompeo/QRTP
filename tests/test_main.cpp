@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <optional>
 #include <random>
@@ -8,6 +9,7 @@
 #include <vector>
 
 #include "qrtp/adaptive.hpp"
+#include "qrtp/base64.hpp"
 #include "qrtp/crc32.hpp"
 #include "qrtp/framing.hpp"
 #include "qrtp/link.hpp"
@@ -33,6 +35,40 @@ void test_crc32() {
     const char* check = "123456789";
     const uint32_t c = qrtp::crc32(reinterpret_cast<const uint8_t*>(check), 9);
     CHECK(c == 0xCBF43926u); // standard CRC-32/ISO-HDLC check value
+}
+
+void test_base64() {
+    // RFC 4648 standard test vectors.
+    auto to_bytes = [](const char* s) { return std::vector<uint8_t>(s, s + strlen(s)); };
+    CHECK(qrtp::base64_encode({}) == "");
+    CHECK(qrtp::base64_encode(to_bytes("f")) == "Zg==");
+    CHECK(qrtp::base64_encode(to_bytes("fo")) == "Zm8=");
+    CHECK(qrtp::base64_encode(to_bytes("foo")) == "Zm9v");
+    CHECK(qrtp::base64_encode(to_bytes("foob")) == "Zm9vYg==");
+    CHECK(qrtp::base64_encode(to_bytes("fooba")) == "Zm9vYmE=");
+    CHECK(qrtp::base64_encode(to_bytes("foobar")) == "Zm9vYmFy");
+
+    CHECK(qrtp::base64_decode("Zg==") == to_bytes("f"));
+    CHECK(qrtp::base64_decode("Zm9vYmFy") == to_bytes("foobar"));
+
+    // The actual bug this exists to fix: binary data riddled with embedded zero bytes (exactly
+    // what a real QRTP frame header looks like — e.g. a SYN frame's seq field is 0x00 0x00 0x00
+    // 0x00) must round-trip through encode+decode without truncating at the first zero.
+    std::vector<uint8_t> binary_with_nulls = {0x01, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xAB, 0x00, 0x00};
+    auto roundtripped = qrtp::base64_decode(qrtp::base64_encode(binary_with_nulls));
+    CHECK(roundtripped == binary_with_nulls);
+    CHECK(roundtripped.size() == binary_with_nulls.size()); // would fail if truncated at a \0
+
+    // Round-trip every length 0..64 of pseudo-random bytes (including zeros) to catch any
+    // off-by-one in the padding logic.
+    std::mt19937 rng(123);
+    bool all_ok = true;
+    for (size_t len = 0; len <= 64; ++len) {
+        std::vector<uint8_t> data(len);
+        for (auto& b : data) b = static_cast<uint8_t>(rng() & 0xFF);
+        if (qrtp::base64_decode(qrtp::base64_encode(data)) != data) { all_ok = false; break; }
+    }
+    CHECK(all_ok);
 }
 
 void test_sha256() {
@@ -199,6 +235,7 @@ void test_cancellation() {
 
 int main() {
     test_crc32();
+    test_base64();
     test_sha256();
     test_framing_roundtrip();
     test_adaptive_aimd();

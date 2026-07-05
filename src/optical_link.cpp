@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include "qrtp/base64.hpp"
 #include "qrtp/crc32.hpp"
 
 #ifdef _WIN32
@@ -54,7 +55,12 @@ OpticalLink::~OpticalLink() {
 }
 
 void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
-    const QrMatrix qr = qr_encode_bytes(frame_bytes, cfg_.ec_level);
+    // Base64 first: our protocol frames are dense binary (a SYN's seq field alone is four 0x00
+    // bytes), and cv::QRCodeDetector's decode path isn't trustworthy with embedded NUL bytes —
+    // see base64.hpp. Base64 text is pure printable ASCII, sidestepping the question entirely.
+    const std::string encoded_text = base64_encode(frame_bytes);
+    const std::vector<uint8_t> encoded_bytes(encoded_text.begin(), encoded_text.end());
+    const QrMatrix qr = qr_encode_bytes(encoded_bytes, cfg_.ec_level);
     const int quiet = 4;
     const int modules_per_side = qr.width + 2 * quiet;
 
@@ -96,15 +102,14 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
             // Live camera preview — also helps the user physically aim the camera at the sender's
             // screen, not just cosmetic.
             cv::imshow(window_name_, frame);
-            const std::string decoded = det(detector_)->detectAndDecode(frame);
-            if (!decoded.empty()) {
-                std::vector<uint8_t> bytes(decoded.begin(), decoded.end());
-                const uint32_t h = crc32(bytes.data(), bytes.size());
+            const std::string decoded_text = det(detector_)->detectAndDecode(frame);
+            if (!decoded_text.empty()) {
+                const uint32_t h = crc32(reinterpret_cast<const uint8_t*>(decoded_text.data()), decoded_text.size());
                 const std::vector<uint8_t> hash_bytes = {uint8_t(h), uint8_t(h >> 8), uint8_t(h >> 16),
                                                            uint8_t(h >> 24)};
                 if (hash_bytes != last_decoded_hash_) {
                     last_decoded_hash_ = hash_bytes;
-                    out = std::move(bytes);
+                    out = base64_decode(decoded_text);
                     cv::waitKey(1);
                     return true;
                 }
