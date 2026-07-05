@@ -6,6 +6,35 @@ session.
 
 ## Resolved
 
+### The forced 1280x720 camera resolution request helped one machine and hurt the other — reverted (2026-07-05)
+
+**Data** (real two-machine log, same transfer, both sides logging "camera opened"): the sending
+machine's camera negotiated exactly what was requested (`1280x720`) and got much faster captures
+(`avg_capture_ms` down to 0.5-1.5ms). The *receiving* machine's camera **ignored the requested
+height** and snapped to a different native mode (`1280x1024` — more total pixels than requested,
+not fewer), and its `avg_decode_ms` came back roughly **4-5x worse** (56-91ms) than the ~10-19ms
+baseline from before this request existed. Overall transfer time (33.6s) was actually slightly
+*better* than the prior run despite this, most likely because retransmit/AIMD variance between
+real runs is large enough to mask a single machine's decode regression — but the receiver's own
+decode numbers are unambiguous and directly comparable to its own prior baseline.
+
+**Conclusion**: forcing a specific capture resolution is camera/driver-dependent in ways that can't
+be predicted or tested from this dev environment (no camera hardware available here at all) —
+some cameras have a fast native mode near the request and handle it well; others fall back to a
+different, sometimes *worse*, mode entirely when the exact request can't be met. This is the third
+time in this session a proactive tuning attempt reasoned soundly from data still needed reverting
+once tested against real, asymmetric hardware (after the receiver-side fps controller and the
+fps-mirroring attempt) — same lesson each time: verify before generalizing a fix across two
+machines that don't necessarily behave the same.
+
+**Fix**: removed the `cap->set(CAP_PROP_FRAME_WIDTH/HEIGHT, ...)` calls entirely. Kept the
+diagnostic log line (now just reporting whatever resolution the camera's own default turns out to
+be, via `cap->get(...)`) since that's harmless, useful information regardless of whether a
+resolution is ever forced again.
+
+**Verified**: `make test`, native build, and the OpenCV-enabled Windows cross-compile all build
+and pass cleanly.
+
 ### Real diagnostic log confirmed decode time (~10-19ms/attempt), not rendering, is now the dominant cost — requested a capped camera capture resolution (2026-07-05)
 
 **Data** (real user log, 13110-byte transfer, ~38s): `encode_ms` 0.2–2ms, `render_ms` 0.2–0.7ms
