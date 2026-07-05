@@ -36,12 +36,17 @@ struct AdaptiveConfig {
 
     ECLevel ec_level_initial = ECLevel::M;
 
-    // Was 3.0 (conservative default, letting the AIMD ramp up from there) — raised to 24 by
-    // request, based on real hardware testing showing that range works well as a starting point.
-    // The AIMD's existing downshift still protects this exactly as it protects any other
-    // fps_initial value: if 24 turns out to be too fast for a given camera/lighting setup, loss
-    // events pull it back down (severity-scaled, see downshift()) same as always.
-    double fps_initial = 24.0;
+    // Was 3.0 for most of this project's life, based on real hardware evidence going all the way
+    // back to v6 (10fps was already too fast for a webcam to focus/expose/lock onto reliably) —
+    // briefly raised to 24 by request, then reverted after "still very slow" persisted even with
+    // fast retransmit reverted. The user's own hypothesis for that ("the sender changes QR too
+    // quickly") lines up with the original v6 evidence: jumping straight to a fast fps skips the
+    // "prove the channel can sustain it first" step the AIMD is specifically built around,
+    // especially risky right at the start of a session (the handshake) before the camera has had
+    // any chance to settle focus/exposure at all. fps_max stays 60 (that ceiling *is*
+    // real-hardware-confirmed, v12) — a genuinely good channel still ramps up there quickly via
+    // upshift()'s existing multiplicative growth; this only changes where it's required to start.
+    double fps_initial = 3.0;
     double fps_min = 1.0;
     double fps_max = 60.0;
 

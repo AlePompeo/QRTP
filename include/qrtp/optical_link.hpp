@@ -14,12 +14,12 @@ namespace qrtp {
 
 struct OpticalLinkConfig {
     int camera_index = 0;
-    // Was 3.0 (conservative starting point, letting the AIMD ramp it up); raised to 24 by request
-    // based on real hardware testing showing that range works well from the start. Matches
+    // Reverted 24 -> 3 (see AdaptiveConfig::fps_initial for the full reasoning — starting fast
+    // skips the "prove the channel first" step the AIMD is built around, especially risky right
+    // at the handshake before the camera has settled focus/exposure at all). Matches
     // AdaptiveConfig::fps_initial — this is only the value the link is constructed with before any
-    // Sender/Receiver ever calls set_fps(); the AIMD takes over from there and still protects
-    // against this being too fast for a given camera/lighting setup via its existing downshift.
-    double fps = 24.0;
+    // Sender/Receiver ever calls set_fps(); the AIMD takes over from there.
+    double fps = 3.0;
     QrEcLevel ec_level = QrEcLevel::M;
     // Defaults to kAutoMaxResolution (both), which requests the camera's own highest available
     // mode automatically (see OpticalLink's constructor for how — OpenCV has no portable "list

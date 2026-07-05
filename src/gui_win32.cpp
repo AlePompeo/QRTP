@@ -199,7 +199,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             mk(L"STATIC", L"Indice camera:", 0, 10, 80, 100, 20, 0);
             mk(L"EDIT", L"0", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 110, 77, 50, 22, IDC_CAMERA_EDIT);
             mk(L"STATIC", L"FPS:", 0, 175, 80, 40, 20, 0);
-            mk(L"EDIT", L"24", WS_BORDER | ES_AUTOHSCROLL, 220, 77, 50, 22, IDC_FPS_EDIT);
+            mk(L"EDIT", L"3", WS_BORDER | ES_AUTOHSCROLL, 220, 77, 50, 22, IDC_FPS_EDIT);
             mk(L"STATIC", L"Ris. (LxA):", 0, 285, 80, 85, 20, 0);
             // Pre-filled with "max" — the automatic default (see OpticalLinkConfig::
             // kAutoMaxResolution): requests the camera's own highest available mode. Editable per
@@ -252,7 +252,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 wchar_t fps_buf[32];
                 GetDlgItemTextW(hwnd, IDC_FPS_EDIT, fps_buf, 32);
                 double fps = wcstod(fps_buf, nullptr);
-                if (fps <= 0.0) fps = 24.0;
+                if (fps <= 0.0) fps = 3.0;
 
                 // "max" or blank (the default) -> auto-detect the camera's highest mode; "0x0" ->
                 // skip any request and leave the camera fully alone; any other "WxH" -> request

@@ -6,6 +6,38 @@ session.
 
 ## Resolved
 
+### Still very slow after reverting fast retransmit — reverted fps_initial back to 3.0 too (2026-07-05)
+
+**Symptom**: after reverting fast retransmit (previous entry), the user reported the transfer was
+still very slow, and floated a new hypothesis: maybe the sender is changing QR codes too fast for
+the camera to keep up.
+
+**This lines up directly with the project's own oldest real-hardware evidence**: `fps_initial` was
+3.0 for essentially this entire project's history, specifically because v6 (very early in this
+project) found that even 10fps was already too fast for a real webcam to focus/expose/lock onto
+reliably. Raising the *default starting point* to 24 (a few entries back, by request) skipped the
+"prove the channel can sustain it first" step the whole AIMD design is built around — jumping
+straight to a fast display rate is riskiest right at the very start of a session (the handshake),
+before the camera has had any chance to settle focus/exposure at all. In hindsight, the framing
+that shipped alongside that change ("based on real hardware testing showing that range works well")
+overstated the evidence behind it — the fps=24 request addressed a symptom (occasional missed
+frames), but the actual fix attempted for that symptom was fast retransmit, not the starting fps
+itself; raising fps_initial to 24 was a separate, less-examined change riding along with it.
+
+**Fix**: reverted `AdaptiveConfig::fps_initial` and `OpticalLinkConfig::fps` back to 3.0 (GUI field
+and CLI fallback too). `fps_max` stays at 60 — that ceiling *is* real-hardware-confirmed (v12); a
+channel that's actually working well still climbs there quickly via `upshift()`'s existing
+multiplicative growth (further sped up by the fer_window/fer_low and growth-rate changes from
+earlier this session) — this change only affects where the AIMD is required to start, not how fast
+it's still allowed to go once it's proven itself.
+
+**Verified**: `make test`, a full loopback demo transfer (byte-for-byte + hash match), native
+build, and the OpenCV-enabled Windows cross-compile all pass/build cleanly.
+
+**Still open**: if throughput remains poor even back at fps_initial=3, the next thing to
+reconsider is the MJPEG capture request (v33, still active) — per the controlled-comparison plan
+from the previous entry, that's the next variable to isolate once fps is no longer a confounder.
+
 ### Throughput got much worse after fps=24 + fast retransmit shipped together — found a real design flaw in fast retransmit, reverted it (2026-07-05)
 
 **Symptom**: real user report — transfer speed got a lot worse, unsure whether the new MJPEG
