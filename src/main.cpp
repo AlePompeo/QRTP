@@ -30,7 +30,7 @@ void print_usage() {
         "      Full send+receive transfer over an in-process loopback channel, with optional\n"
         "      synthetic loss/corruption (P in [0,1]). No camera/monitor required.\n\n"
 #ifdef QRTP_WITH_OPENCV
-        "  qrtp send <file> [--camera N] [--fps F] [--width W --height H] [--qr-grid N] [--mjpeg]\n"
+        "  qrtp send <file> [--camera N] [--fps F] [--width W --height H] [--qr-grid N] [--no-mjpeg]\n"
         "      Send over the real optical link: renders QR frames to a window and reads\n"
         "      ACKs/SACKs back from camera index N (the peer's screen must face this camera).\n"
         "      --qr-grid N (default 1, classic/original behavior) batches N frames into a single\n"
@@ -49,13 +49,14 @@ void print_usage() {
         "      testing showed the exact same request can be honored cleanly by one camera and\n"
         "      remapped to a worse mode by another. Check the logged \"camera opened: resolution\n"
         "      ...\" line to see what actually got negotiated either way.\n"
-        "      --mjpeg requests MJPEG capture from the camera (off by default as of 2026-07-05).\n"
-        "      Can help at high resolutions on cameras that throttle in raw/uncompressed mode, but\n"
-        "      JPEG's lossy compression can also blur sharp QR module edges and hurt decode\n"
-        "      reliability — real hardware showed opposite effects on different cameras, so try it\n"
-        "      both ways and compare the logged \"fourcc=\" / decode stats.\n\n"
-        "  qrtp receive --out <dir> [--camera N] [--fps F] [--width W --height H] [--qr-grid N] [--mjpeg]\n"
-        "      Receive over the real optical link. Same --width/--height, --qr-grid and --mjpeg\n"
+        "      MJPEG capture is requested by default (real hardware testing on 2026-07-05 showed\n"
+        "      raw/uncompressed capture costing ~100x more per frame on at least one camera, with\n"
+        "      no reliability benefit from disabling it). Pass --no-mjpeg to request raw capture\n"
+        "      instead, if a specific camera does better with it — check the logged \"fourcc=\" /\n"
+        "      avg_capture_ms stats to compare.\n\n"
+        "  qrtp receive --out <dir> [--camera N] [--fps F] [--width W --height H] [--qr-grid N]\n"
+        "                          [--no-mjpeg]\n"
+        "      Receive over the real optical link. Same --width/--height, --qr-grid and --no-mjpeg\n"
         "      notes as above.\n");
 #else
         "  qrtp send / qrtp receive\n"
@@ -149,7 +150,7 @@ int cmd_send_optical(int argc, char** argv) {
         else if (a == "--width" && i + 1 < argc) ocfg.camera_width = std::stoi(argv[++i]);
         else if (a == "--height" && i + 1 < argc) ocfg.camera_height = std::stoi(argv[++i]);
         else if (a == "--qr-grid" && i + 1 < argc) ocfg.qr_codes_per_frame = std::stoi(argv[++i]);
-        else if (a == "--mjpeg") ocfg.request_mjpeg = true;
+        else if (a == "--no-mjpeg") ocfg.request_mjpeg = false;
     }
     try {
         ocfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
@@ -176,7 +177,7 @@ int cmd_receive_optical(int argc, char** argv) {
         else if (a == "--width" && i + 1 < argc) ocfg.camera_width = std::stoi(argv[++i]);
         else if (a == "--height" && i + 1 < argc) ocfg.camera_height = std::stoi(argv[++i]);
         else if (a == "--qr-grid" && i + 1 < argc) ocfg.qr_codes_per_frame = std::stoi(argv[++i]);
-        else if (a == "--mjpeg") ocfg.request_mjpeg = true;
+        else if (a == "--no-mjpeg") ocfg.request_mjpeg = false;
         else if (a == "--out" && i + 1 < argc) out_dir = argv[++i];
     }
     try {

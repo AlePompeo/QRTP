@@ -6,6 +6,49 @@ session.
 
 ## Resolved
 
+### MJPEG A/B test concluded: re-enabled by default, JPEG-artifact theory did not hold up (2026-07-05)
+
+**Symptom**: after making MJPEG opt-in (default off, previous entry), the user tested and pasted a
+fresh log. `avg_capture_ms` was ~103-111ms per `cap->read()` call — and critically, this held
+regardless of `polls_since_last` (same magnitude at polls=1, 2, 3, 4, 10), meaning it's a real
+per-call cost, not a rolling average skewed by a few outliers. That's roughly 100x worse than the
+<1.5ms measured with MJPEG on in the log from the previous entry. Meanwhile the reliability problem
+this was suspected of causing (stuck-offset splits, retransmit chains, cascading AIMD downshifts)
+showed up just as badly with MJPEG off as it did with MJPEG on, and total transfer time did not
+improve (36.4s vs. 33.6s previously — if anything, slightly worse).
+
+**Conclusion**: this is a direct, controlled comparison on the same real hardware and the same
+class of transfer, and it points the opposite way from the previous entry's hypothesis. The
+original USB-bandwidth reasoning for forcing MJPEG (raw YUY2 at this resolution exceeding what
+USB/the driver can sustain per frame) is the one that's now directly confirmed, not just plausible.
+The JPEG-artifact-hurts-decode-reliability theory is the one that didn't hold up: disabling MJPEG
+didn't fix reliability, it just made every capture ~100x slower.
+
+**Fix**: reverted `OpticalLinkConfig::request_mjpeg` default back to `true` (GUI checkbox now
+checked by default too). Kept it as a genuine runtime toggle rather than hard-coding MJPEG back in
+unconditionally — CLI flag renamed `--no-mjpeg` (was `--mjpeg`) since the default flipped — because
+the resolution request already proved real cameras can disagree about what capture mode suits them
+best; this only changes which side of that toggle new users start from, given the evidence so far.
+
+**Verified**: `make test`, a full loopback demo transfer (byte-for-byte identical + hash match),
+native build, and the Windows cross-compile (all three .exe targets) all build/pass cleanly.
+
+**New open question, worth its own investigation**: in the MJPEG-off log, `avg_capture_ms` and
+`avg_decode_ms` both dropped sharply (from ~103-134ms to ~27-40ms) at the exact moment the transfer
+fell into a low-fps, single-offset retransmit loop (window=2, chunk=99, fps≈4.9) after a string of
+"splitting stuck offset" events — then stayed low even as fps climbed back up afterward. Capture and
+decode cost moving together, exactly at a fps/activity transition, doesn't fit a pure camera-
+hardware explanation (cap->read() latency shouldn't care about our chunk/window size). Two
+candidate explanations, not yet distinguished: (1) the camera's own auto-exposure/autofocus control
+loop hunting under rapidly-changing on-screen content (different QR codes flashing by at higher fps
+change average scene brightness/contrast quickly), which is a documented cause of variable capture
+latency in UVC webcams — testable via `CAP_PROP_AUTO_EXPOSURE`/`CAP_PROP_AUTOFOCUS`, not yet used
+anywhere in this codebase; (2) CPU contention if sender and receiver are both running on the *same*
+physical machine for testing (webcam pointed at that machine's own screen) — higher fps means more
+simultaneous render+capture+decode cycles/sec competing for the same cores, which would inflate
+both capture and decode wall-clock time under load and relax immediately once fps drops. Need to
+confirm the test topology (one machine or two) before picking which of these to chase next.
+
 ### MJPEG (forced since v33) made opt-in — fresh log shows a reliability problem, not a speed one (2026-07-05)
 
 **Symptom**: user asked whether "~200 bytes per QR" was normal, then pasted a real diagnostic log

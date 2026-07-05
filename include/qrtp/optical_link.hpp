@@ -34,17 +34,22 @@ struct OpticalLinkConfig {
     static constexpr int kAutoMaxResolution = -1;
     int camera_width = kAutoMaxResolution;
     int camera_height = kAutoMaxResolution;
-    // Defaults to false as of 2026-07-05 (see not_working.md): originally forced unconditionally,
-    // reasoning purely about USB bandwidth (raw YUY2 at high resolution can exceed what USB
-    // sustains). Fresh real-hardware logs show capture itself is fast (<1.5ms/frame) while decode
-    // *reliability* is poor (many retries, cascading AIMD downshifts that never stabilize) even
-    // though decode cost itself is stable — a symptom profile that MJPEG's lossy compression could
-    // directly explain: JPEG artifacts (ringing/blur) are well known to degrade exactly the sharp
-    // high-contrast edges a QR module boundary is. Same "opposite effects on different hardware"
-    // risk already seen with the resolution request below, so treated the same way: opt-in, with
-    // the negotiated fourcc always logged so a real per-machine comparison is possible instead of
-    // assumed either way.
-    bool request_mjpeg = false;
+    // Was briefly made false-by-default (2026-07-05) on the theory that JPEG compression artifacts
+    // might be degrading QR module edges enough to explain a decode-reliability problem seen in a
+    // real log. Reverted back to true after a direct controlled A/B on the *same* problematic
+    // transfer: with this off, avg_capture_ms measured 103-111ms per cap->read() call, consistently,
+    // regardless of how many polls the average was over (i.e. a real per-call cost, not an
+    // average distorted by outliers) — versus <1.5ms with it on. That's the exact symptom the
+    // original USB-bandwidth reasoning predicted (raw YUY2 at this resolution saturating what USB/
+    // the driver can sustain per frame), now directly confirmed rather than just plausible. Meanwhile
+    // the reliability problem this was suspected of causing (stuck offsets, cascading retransmits)
+    // showed up identically in both the MJPEG-on and MJPEG-off logs, and total transfer time did not
+    // improve with it off (if anything, slightly worse) — so the JPEG-artifact theory is the one that
+    // didn't hold up, not the bandwidth one. Left as a runtime toggle (not hard-coded back to
+    // unconditional) since the resolution request below already demonstrated real cameras can
+    // disagree about what capture mode works best for them — this just changes which side of that
+    // toggle is the default given the evidence so far.
+    bool request_mjpeg = true;
     // Optional diagnostics from the optical layer itself (distinct from ProtocolConfig::log):
     // whether the camera is detecting any QR content at all, and whether decoded text survives
     // frame validation. Wire it to the same sink as ProtocolConfig::log to see both in one place —

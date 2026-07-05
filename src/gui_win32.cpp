@@ -218,11 +218,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // needing a rebuild if it doesn't hold up on real hardware. Must match on both machines.
             mk(L"EDIT", L"1", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 130, 103, 50, 22, IDC_QRGRID_EDIT);
 
-            // Off by default as of 2026-07-05 (see OpticalLinkConfig::request_mjpeg): forced
-            // unconditionally before, but fresh real-hardware logs pointed at JPEG compression
-            // artifacts as a plausible cause of poor decode reliability. Opt-in per machine, same
-            // as the resolution field above — must match on both sides of the transfer.
+            // Checked by default (see OpticalLinkConfig::request_mjpeg): a direct A/B on real
+            // hardware confirmed raw capture costing ~100x more per frame than MJPEG on this
+            // machine, with no measurable reliability benefit from turning it off. Still a runtime
+            // toggle, not hard-coded, since a specific camera could still disagree — must match on
+            // both sides of the transfer.
             mk(L"BUTTON", L"Richiedi MJPEG", BS_AUTOCHECKBOX, 200, 104, 160, 20, IDC_MJPEG_CHECK);
+            CheckDlgButton(hwnd, IDC_MJPEG_CHECK, BST_CHECKED);
 
             mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 143, 100, 28, IDC_START_BTN);
             HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 143, 100, 28, IDC_STOP_BTN);
