@@ -6,6 +6,37 @@ session.
 
 ## Resolved
 
+### Real diagnostic log confirmed decode time (~10-19ms/attempt), not rendering, is now the dominant cost — requested a capped camera capture resolution (2026-07-05)
+
+**Data** (real user log, 13110-byte transfer, ~38s): `encode_ms` 0.2–2ms, `render_ms` 0.2–0.7ms
+(both confirm the previous rendering fix worked — negligible now), `avg_capture_ms` widely variable
+(0.2–17ms), and **`avg_decode_ms` consistently 10–19ms per `detectAndDecode()` call, across QR
+versions 3 through 12 with no strong size-dependence visible in this range** (version 3, 29×29
+modules: ~12–18ms; version 12, 65×65 modules: ~12–19ms). That last point is the key finding: decode
+cost not scaling much with the QR's own module count suggests the dominant cost is scanning the
+*whole captured camera frame* for finder patterns, not decoding the QR's payload once found — which
+points at camera capture *resolution* rather than QR density as the next lever, a materially
+different conclusion than "make the QR smaller again."
+
+**Change**: `OpticalLink`'s constructor now requests `1280x720` from the camera
+(`cv::CAP_PROP_FRAME_WIDTH`/`HEIGHT`) right after opening it, and logs the actually negotiated
+resolution (`cap->get(...)`, since a `set()` request can silently be ignored by an unsupported
+camera/backend — this reports reality, not the request). Many webcams default to their highest
+supported resolution (1080p or above) when nothing is requested; asking `detectAndDecode()` to scan
+a smaller frame is a standard, low-risk technique in barcode/QR-scanning applications, and 720p
+still leaves comfortable margin to resolve module edges at typical camera-to-screen distances for
+the QR versions actually seen in this transfer (up to ~65×65 modules).
+
+**Not yet confirmed** — this is reasoned directly from the user's own timing data (not a blind
+guess like the earlier chunk_size_max/fps-mirroring attempts), but the actual before/after
+`avg_decode_ms` on real hardware, and the negotiated-resolution log line itself, are the two things
+to check on the next transfer. If 720p turns out to already be at or below what this camera
+natively provides, the log will show that directly and this change will be a no-op rather than a
+guess masquerading as a fix.
+
+**Verified**: `make test`, the native build, and the OpenCV-enabled Windows cross-compile all build
+and pass cleanly.
+
 ### Down to 35s from 97s after the rendering/grayscale fixes — added real timing diagnostics instead of guessing the next tuning constant (2026-07-05)
 
 **Context**: user confirmed the render + grayscale fixes helped a lot (97s → 35s) and believes the
