@@ -45,10 +45,16 @@ void AdaptiveController::record_clean_round() {
     }
 }
 
-void AdaptiveController::record_loss_event() {
+void AdaptiveController::record_loss_event(double severity) {
+    severity = std::clamp(severity, 0.0, 1.0);
     push_sample(false);
-    window_size_ = std::max(cfg_.window_min, window_size_ / 2);
-    downshift();
+    // Full multiplicative decrease (halve) at severity=1.0 (the whole window timed out), tapering
+    // to a light trim for an isolated straggler — one late frame out of a window of several is a
+    // weak signal and shouldn't crash the window the same as a total wipeout.
+    const double shrink_factor = 1.0 - 0.5 * severity;
+    window_size_ = std::max(cfg_.window_min,
+                             static_cast<size_t>(std::llround(window_size_ * shrink_factor)));
+    downshift(severity);
 }
 
 void AdaptiveController::upshift() {
@@ -69,14 +75,24 @@ void AdaptiveController::upshift() {
     if (fps_ < cfg_.fps_max) fps_ = std::min(cfg_.fps_max, fps_ * 1.25 + 0.5);
 }
 
-void AdaptiveController::downshift() {
+void AdaptiveController::downshift(double severity) {
+    severity = std::clamp(severity, 0.0, 1.0);
+
     if (chunk_size_ > cfg_.chunk_size_min) {
-        chunk_size_ = std::max(cfg_.chunk_size_min, chunk_size_ - chunk_size_ / 3 - 1);
-    } else if (ec_level_ != ECLevel::H) {
+        // Full severity shrinks by ~1/3 (the old flat behavior); a lone straggler barely nudges
+        // it instead of demanding a full renegotiation of chunk size.
+        const auto shrink = static_cast<size_t>((chunk_size_ / 3 + 1) * severity);
+        chunk_size_ = std::max(cfg_.chunk_size_min, chunk_size_ - shrink);
+    } else if (severity >= 0.5 && ec_level_ != ECLevel::H) {
+        // Raising EC level for a fixed chunk size shrinks the QR's module pixels (v9 finding), so
+        // only reach for it when the loss looks systemic, not from one isolated timeout.
         ec_level_ = static_cast<ECLevel>(static_cast<uint8_t>(ec_level_) + 1);
     }
 
-    if (fps_ > cfg_.fps_min) fps_ = std::max(cfg_.fps_min, fps_ * 0.8);
+    if (fps_ > cfg_.fps_min) {
+        // Full severity gives the old fps_*0.8; scale the pullback down for partial severity.
+        fps_ = std::max(cfg_.fps_min, fps_ * (1.0 - 0.2 * severity));
+    }
 }
 
 void AdaptiveController::on_rtt_sample(std::chrono::milliseconds sample) {

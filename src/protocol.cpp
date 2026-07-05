@@ -232,6 +232,11 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
                 link_.set_fps(adaptive_.fps());
                 link_.set_ec_level(adaptive_.ec_level());
 
+                // Fraction of the in-flight window that actually timed out this round — captured
+                // before the loop below splits/erases entries, so it reflects the real ratio.
+                const double severity =
+                    static_cast<double>(timed_out.size()) / static_cast<double>(inflight.size());
+
                 for (uint64_t off : timed_out) {
                     auto it = inflight.find(off);
                     if (it == inflight.end()) continue; // already resolved by a SACK this round
@@ -281,8 +286,8 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
                     }
                 }
 
-                adaptive_.record_loss_event();
-                log("retransmit — window=" + std::to_string(adaptive_.window_size()) +
+                adaptive_.record_loss_event(severity);
+                log("retransmit (severity=" + std::to_string(severity) + ") — window=" + std::to_string(adaptive_.window_size()) +
                     " chunk=" + std::to_string(adaptive_.chunk_size()) +
                     " ec=" + ec_level_name(adaptive_.ec_level()) +
                     " fps=" + std::to_string(adaptive_.fps()));

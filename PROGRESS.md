@@ -369,3 +369,20 @@ Summarized here since `not_working.md` has the full per-bug detail:
 files). Large-file *throughput* after the v12 tuning changes is not yet re-confirmed — first tuning
 pass based on real evidence (the user's own 60fps test) rather than a guess, but still pending a
 real large-file timing report before considering it settled.
+
+- **v13**: user reported throughput after v12 alternates between fast bursts and slowdowns — the
+  classic AIMD sawtooth. Root cause: `record_loss_event()`/`downshift()` always applied a flat,
+  maximal multiplicative decrease (halve the window, shrink chunk by 1/3, `fps_ *= 0.8`) whenever
+  *any* frame timed out, whether it was one straggler out of a large in-flight window or the whole
+  window vanishing at once — so every aggressive v12 climb ended in an oversized crash regardless of
+  how serious the actual loss was. Fixed by adding a `severity` parameter (0..1, the fraction of the
+  in-flight window that timed out this round, computed in `Sender::send_file()` before the
+  retransmit loop mutates `inflight`) that scales the pullback proportionally: window shrink ranges
+  from none (severity 0) to the old halving (severity 1), chunk-size shrink and fps pullback scale
+  linearly with it, and EC-level escalation (which v9 showed can backfire) now only fires when
+  severity is at least 0.5, not on every isolated timeout.
+
+**Not yet re-confirmed by the user** — this is a tuning change reasoned from the AIMD sawtooth
+pattern described, not from fresh diagnostic logs; `make test` and the full loopback suite still
+pass, but real hardware confirmation that the burst/slowdown alternation has actually smoothed out
+is pending.

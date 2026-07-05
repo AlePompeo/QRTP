@@ -58,7 +58,11 @@ public:
 
     void record_frame_sent();
     void record_clean_round();  // a window's worth of frames acked with no retransmit needed
-    void record_loss_event();   // a retransmission timeout fired
+    // A retransmission timeout fired. `severity` (0..1) is the fraction of currently-inflight
+    // frames that timed out this round — one straggler out of a window of several is a much
+    // weaker signal than the whole window vanishing at once, and shouldn't be punished the same.
+    // Defaults to 1.0 (full multiplicative decrease) for callers that can't easily compute it.
+    void record_loss_event(double severity = 1.0);
     void on_rtt_sample(std::chrono::milliseconds sample); // Jacobson/Karels SRTT/RTTVAR update
 
     size_t window_size() const { return window_size_; }
@@ -83,7 +87,7 @@ private:
 
     void push_sample(bool clean);
     void upshift();
-    void downshift();
+    void downshift(double severity);
 };
 
 } // namespace qrtp

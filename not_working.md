@@ -6,6 +6,36 @@ session.
 
 ## Resolved
 
+### Throughput alternated between fast bursts and slowdowns after the v12 tuning pass — AIMD sawtooth from a flat, maximal decrease on every loss (2026-07-05)
+
+**Symptom**: after the v12 fix (fps ceiling raised to 60, faster upshift), the user reported
+transfers speeding up in short bursts, then slowing down, then speeding up again — repeating.
+Classic AIMD "dente di sega" (sawtooth) behavior.
+
+**Root cause**: `AdaptiveController::record_loss_event()`/`downshift()` treated every retransmit
+round identically, regardless of how much of the in-flight window actually timed out. A single
+straggler frame out of a window of, say, 20 in-flight frames triggered the exact same maximal
+multiplicative decrease as the entire window vanishing at once: window halved, chunk size shrunk by
+~1/3, fps multiplied by 0.8. Combined with v12's faster, more aggressive upshift, the controller
+would climb quickly, hit one isolated hiccup, crash hard, then have to climb all the way back up
+again — the sawtooth the user described.
+
+**Fix**: added a `severity` parameter (0.0–1.0) to `record_loss_event(double severity)` and
+`downshift(double severity)`, equal to the fraction of the currently in-flight window that timed
+out in that round. `Sender::send_file()` computes it in the retransmit branch as
+`timed_out.size() / inflight.size()`, captured before the retransmit loop below it starts
+splitting/erasing entries. The window shrink, chunk-size shrink, and fps pullback all now scale
+with `severity` (full old behavior at severity=1.0, near-zero pullback for an isolated single-frame
+timeout in a large window). EC-level escalation — which v9 showed can backfire by shrinking QR
+module pixels for a fixed chunk size — is now gated behind `severity >= 0.5` instead of firing on
+every single timeout.
+
+**Not yet re-confirmed by the user on real hardware** — reasoned from the AIMD sawtooth pattern
+described in their report, not from fresh diagnostic logs. `make test` (including
+`test_adaptive_aimd`, which still calls `record_loss_event()` at its default `severity = 1.0` and
+continues to pass) and the full loopback suite both pass after the change; a real transfer showing
+smoother throughput is the outstanding confirmation.
+
 ### A completed transfer reported a hash mismatch — stale duplicate of a since-split offset silently corrupted reassembly (2026-07-05)
 
 **Symptom**: a real transfer ran all the way to `all N bytes acked, tearing down` on the sender
