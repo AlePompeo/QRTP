@@ -21,7 +21,9 @@ cv::VideoCapture* cap(void* p) { return reinterpret_cast<cv::VideoCapture*>(p); 
 cv::QRCodeDetector* det(void* p) { return reinterpret_cast<cv::QRCodeDetector*>(p); }
 } // namespace
 
-OpticalLink::OpticalLink(OpticalLinkConfig cfg) : cfg_(cfg), window_name_("qrtp-display") {
+OpticalLink::OpticalLink(OpticalLinkConfig cfg)
+    : cfg_(cfg), out_window_name_("QRTP - invio (mostra questo alla fotocamera dell'altro PC)"),
+      camera_window_name_("QRTP - anteprima fotocamera locale") {
 #ifdef _WIN32
     // Without this, Windows silently bitmap-stretches (and blurs) everything this process draws
     // on a display with scaling enabled (125%/150%, the default on most modern laptops) — which
@@ -33,7 +35,12 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg) : cfg_(cfg), window_name_("qrtp-
     if (screen_w_ <= 0 || screen_h_ <= 0) { screen_w_ = 1000; screen_h_ = 1000; }
 #endif
 
-    cv::namedWindow(window_name_, cv::WINDOW_NORMAL);
+    // Two separate windows — see optical_link.hpp for why sharing one would break the protocol.
+    cv::namedWindow(out_window_name_, cv::WINDOW_NORMAL);
+    cv::namedWindow(camera_window_name_, cv::WINDOW_NORMAL);
+    cv::resizeWindow(camera_window_name_, 480, 360);
+    cv::moveWindow(camera_window_name_, 20, 20);
+
 #ifdef _WIN32
     // DirectShow is the well-known reliable backend for opening a webcam by index on Windows —
     // OpenCV's default auto-selected backend (Media Foundation) is markedly slower to open and
@@ -51,7 +58,8 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg) : cfg_(cfg), window_name_("qrtp-
 OpticalLink::~OpticalLink() {
     delete cap(capture_);
     delete det(detector_);
-    cv::destroyWindow(window_name_);
+    cv::destroyWindow(out_window_name_);
+    cv::destroyWindow(camera_window_name_);
 }
 
 void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
@@ -85,12 +93,16 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     if (side != last_window_side_) {
         // Large and centered, but still a normal decorated window (WINDOW_NORMAL, not
         // WND_PROP_FULLSCREEN) — "fills the screen" without going full OS-level fullscreen.
-        cv::resizeWindow(window_name_, side, side);
-        cv::moveWindow(window_name_, (screen_w_ - side) / 2, (screen_h_ - side) / 2);
+        cv::resizeWindow(out_window_name_, side, side);
+        cv::moveWindow(out_window_name_, (screen_w_ - side) / 2, (screen_h_ - side) / 2);
         last_window_side_ = side;
     }
 
-    cv::imshow(window_name_, img);
+    // Shown in its own window (out_window_name_) that nothing else writes to, so it stays on
+    // screen exactly as-is — for as long as it takes the other side to read it, not just for this
+    // call's brief waitKey — until the next real send() replaces it. try_receive()'s camera-preview
+    // updates happen in a completely separate window, so they can never race with this.
+    cv::imshow(out_window_name_, img);
     cv::waitKey(static_cast<int>(1000.0 / std::max(1.0, cfg_.fps)));
 }
 
@@ -99,9 +111,10 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
     while (std::chrono::steady_clock::now() < deadline) {
         cv::Mat frame;
         if (cap(capture_)->read(frame) && !frame.empty()) {
-            // Live camera preview — also helps the user physically aim the camera at the sender's
-            // screen, not just cosmetic.
-            cv::imshow(window_name_, frame);
+            // Live camera preview in its own window — helps the user aim the camera, and never
+            // touches out_window_name_, so it can't stomp on whatever we're currently displaying
+            // to the other side.
+            cv::imshow(camera_window_name_, frame);
             const std::string decoded_text = det(detector_)->detectAndDecode(frame);
             if (!decoded_text.empty()) {
                 const uint32_t h = crc32(reinterpret_cast<const uint8_t*>(decoded_text.data()), decoded_text.size());
@@ -117,10 +130,11 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
                 // advanced to the next frame yet; keep polling.
             }
         }
-        // cv::waitKey pumps the HighGUI window's message loop (paints, lets it be moved/closed).
-        // send() gets this for free via its own per-frame waitKey call; try_receive() previously
-        // only slept, so its window never processed any messages, which Windows eventually reports
-        // as "Not Responding" and can crash — this call is what was missing, not just cosmetic.
+        // cv::waitKey pumps HighGUI's message loop for *all* of this process's windows (paints,
+        // lets them be moved/closed) — send() gets this for free via its own per-frame waitKey
+        // call; try_receive() previously only slept, so neither window ever processed a message
+        // while only receiving was happening, which Windows eventually reports as "Not
+        // Responding" and can crash — this call is what was missing, not just cosmetic.
         cv::waitKey(1);
     }
     return false;

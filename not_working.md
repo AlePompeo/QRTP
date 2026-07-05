@@ -6,6 +6,47 @@ session.
 
 ## Resolved
 
+### Handshake eventually worked, but the data phase always failed (own camera activity stomped the outgoing QR) (2026-07-05)
+
+**Symptom**: real log from the user — `SYN` needed 5 attempts before a `SYN_ACK` came back, then
+`ACK sent, connection established` — the handshake *did* eventually succeed. But every single
+`DATA` frame afterward failed, with the AIMD controller cascading all the way down to its floor
+(window=1, chunk=32, EC=H) and then hard-failing with `max retransmit attempts exceeded`. The
+receiver's log showed only the initial handshake message and nothing else — it never got any DATA
+frame far enough to respond with a SACK.
+
+**Root cause**: `OpticalLink` used a *single shared window* for both showing the outgoing QR
+(`send()`) and previewing the local camera feed (`try_receive()`). Both `Sender` and `Receiver` call
+both methods on the same link — e.g. the sender shows a `DATA` frame, then immediately calls
+`try_receive()` to poll for a `SACK`, and `try_receive()`'s camera-preview `cv::imshow` overwrites
+that same window within about 1ms of the frame being shown, since it polls far more often than
+`send()` is called. The outgoing QR was therefore only ever actually visible for its brief initial
+`waitKey` duration (a fraction of the already-too-fast 100ms at the old fps=10 default) before being
+replaced by the local camera's own feed — leaving almost no real window for the *other* machine's
+camera to catch it. A single handshake frame succeeding after 5 tries is consistent with this: pure
+luck, catching the brief flash once out of several attempts. The data phase needs many such
+round-trips in a row to succeed, and the odds of that never materialized.
+
+**Fix**:
+1. Split into two separate `cv::namedWindow`s: one shows only outgoing QR content (`send()`) and is
+   never touched by anything else, so it stays visible exactly as displayed until the *next* real
+   frame needs to go out — not just for one brief `waitKey` call. The other is purely a local camera
+   preview (`try_receive()`), independent of the first.
+2. Lowered the default display rate from 10fps to 3fps (100ms → ~333ms dwell per frame) — even with
+   the window-stomping bug fixed, 100ms is an aggressive assumption for how fast a real webcam can
+   focus, expose, and have the QR decoder lock on. Changed in three places that all needed to agree:
+   `AdaptiveConfig::fps_initial`, `OpticalLinkConfig::fps` (the CLI default), and the GUI's FPS
+   field's pre-filled value.
+
+**Not yet re-confirmed by the user.** If the data phase still fails after this, the sliding window's
+interaction with a single physical display is the next thing to scrutinize: with `window_size() > 1`
+(starts at 4), the sender's fill loop shows several *different* frames back-to-back before ever
+checking for an ack, so only the last frame in that burst gets to stay on screen indefinitely — the
+earlier ones get only one dwell cycle each before going quiet until their individual RTO fires a
+retransmit. That's a slower but not fundamentally broken retry cadence given the above fixes, but if
+throughput is still very poor, forcing a smaller initial window (`window_initial`) would be the
+next lever to try.
+
 ### Camera never recognized the displayed QR at all; no ACK flashes ever seen on the receiver (2026-07-05)
 
 **Symptom**: pointing a camera at the sender's displayed QR, `cv::QRCodeDetector` never decoded

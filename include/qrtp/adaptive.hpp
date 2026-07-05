@@ -20,9 +20,12 @@ struct AdaptiveConfig {
 
     ECLevel ec_level_initial = ECLevel::M;
 
-    double fps_initial = 10.0;
-    double fps_min = 2.0;
-    double fps_max = 30.0;
+    // A webcam needs meaningful dwell time on a QR to focus, expose, and let the decode algorithm
+    // lock on — 10fps (100ms/frame) proved too fast for real hardware to keep up with reliably;
+    // 3fps (~333ms/frame) is a much more conservative starting point.
+    double fps_initial = 3.0;
+    double fps_min = 1.0;
+    double fps_max = 15.0;
 
     double rto_initial_ms = 500.0;
     double rto_min_ms = 150.0;
