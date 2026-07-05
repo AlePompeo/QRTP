@@ -349,13 +349,20 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
         if (cancelled()) return std::nullopt;
         if (link_.try_receive(raw, cfg_.data_poll_timeout)) {
             auto f = decode_frame(raw);
-            if (!f || f->session_id != session_id) continue;
+            if (!f) {
+                log("decode_frame rejected " + std::to_string(raw.size()) +
+                    " raw bytes (size/CRC mismatch — camera read something, but it wasn't a valid frame)");
+                continue;
+            }
+            if (f->session_id != session_id) continue;
 
             if (f->type == FrameType::SYN) {
                 link_.send(encode_frame(syn_ack)); // sender never saw our SYN_ACK
                 continue;
             }
             if (f->type == FrameType::DATA) {
+                log("DATA received: offset=" + std::to_string(f->seq) + " len=" + std::to_string(f->payload.size()) +
+                    " cumulative_before=" + std::to_string(cumulative));
                 chunks[f->seq] = f->payload; // idempotent: retransmits just overwrite identical bytes
                 advance_cumulative();
                 ++frames_since_sack;

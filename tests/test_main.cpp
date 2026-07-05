@@ -60,14 +60,21 @@ void test_base64() {
     CHECK(roundtripped.size() == binary_with_nulls.size()); // would fail if truncated at a \0
 
     // Round-trip every length 0..64 of pseudo-random bytes (including zeros) to catch any
-    // off-by-one in the padding logic.
+    // off-by-one in the padding logic. Covers the full realistic QRTP frame size range: a DATA
+    // frame at the default chunk_size_max (1500) plus header/CRC overhead is ~1523 raw bytes.
     std::mt19937 rng(123);
     bool all_ok = true;
-    for (size_t len = 0; len <= 64; ++len) {
+    size_t first_bad_len = 0;
+    for (size_t len = 0; len <= 1600; ++len) {
         std::vector<uint8_t> data(len);
         for (auto& b : data) b = static_cast<uint8_t>(rng() & 0xFF);
-        if (qrtp::base64_decode(qrtp::base64_encode(data)) != data) { all_ok = false; break; }
+        if (qrtp::base64_decode(qrtp::base64_encode(data)) != data) {
+            all_ok = false;
+            first_bad_len = len;
+            break;
+        }
     }
+    if (!all_ok) std::fprintf(stderr, "  (first failing length: %zu)\n", first_bad_len);
     CHECK(all_ok);
 }
 

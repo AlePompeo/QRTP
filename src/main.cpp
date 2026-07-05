@@ -126,9 +126,10 @@ int cmd_send_optical(int argc, char** argv) {
         else if (a == "--fps" && i + 1 < argc) ocfg.fps = std::stod(argv[++i]);
     }
     try {
+        ocfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
         qrtp::OpticalLink link(ocfg);
         qrtp::ProtocolConfig cfg;
-        cfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
+        cfg.log = ocfg.log;
         qrtp::Sender sender(link, cfg);
         const auto result = sender.send_file(path);
         std::printf("%s: %s\n", result.success ? "OK" : "FAILED", result.message.c_str());
@@ -149,9 +150,10 @@ int cmd_receive_optical(int argc, char** argv) {
         else if (a == "--out" && i + 1 < argc) out_dir = argv[++i];
     }
     try {
+        ocfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
         qrtp::OpticalLink link(ocfg);
         qrtp::ProtocolConfig cfg;
-        cfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
+        cfg.log = ocfg.log;
         qrtp::Receiver receiver(link, cfg);
         qrtp::TransferMetadata meta;
         auto received = receiver.receive_file(meta, std::chrono::minutes(30));

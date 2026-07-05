@@ -117,6 +117,7 @@ void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_in
         qrtp::OpticalLinkConfig ocfg;
         ocfg.camera_index = camera_index;
         ocfg.fps = fps;
+        ocfg.log = post_log;
         qrtp::OpticalLink link(ocfg);
 
         qrtp::ProtocolConfig cfg;

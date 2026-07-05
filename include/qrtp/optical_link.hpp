@@ -1,6 +1,7 @@
 #pragma once
 #ifdef QRTP_WITH_OPENCV
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,11 @@ struct OpticalLinkConfig {
     // algorithm lock on; 10fps (100ms/frame) proved too fast for real hardware in testing.
     double fps = 3.0;
     QrEcLevel ec_level = QrEcLevel::M;
+    // Optional diagnostics from the optical layer itself (distinct from ProtocolConfig::log):
+    // whether the camera is detecting any QR content at all, and whether decoded text survives
+    // frame validation. Wire it to the same sink as ProtocolConfig::log to see both in one place —
+    // essential for telling "camera never sees a QR" apart from "sees one, gets rejected."
+    std::function<void(const std::string&)> log;
 };
 
 // The real physical layer: send() renders a QR frame to an on-screen window; try_receive() polls

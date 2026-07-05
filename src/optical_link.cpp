@@ -107,6 +107,11 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     // call's brief waitKey — until the next real send() replaces it. try_receive()'s camera-preview
     // updates happen in a completely separate window, so they can never race with this.
     cv::imshow(out_window_name_, img);
+    if (cfg_.log) {
+        cfg_.log("[optical] showing QR: version=" + std::to_string(qr.version) + " modules=" +
+                  std::to_string(qr.width) + "x" + std::to_string(qr.width) + " module_px=" +
+                  std::to_string(scale) + " base64_len=" + std::to_string(encoded_text.size()));
+    }
     cv::waitKey(static_cast<int>(1000.0 / std::max(1.0, cfg_.fps)));
 }
 
@@ -127,6 +132,10 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
                 if (hash_bytes != last_decoded_hash_) {
                     last_decoded_hash_ = hash_bytes;
                     out = base64_decode(decoded_text);
+                    if (cfg_.log) {
+                        cfg_.log("[optical] camera read a NEW QR: base64_len=" + std::to_string(decoded_text.size()) +
+                                  " decoded_bytes=" + std::to_string(out.size()));
+                    }
                     cv::waitKey(1);
                     return true;
                 }
