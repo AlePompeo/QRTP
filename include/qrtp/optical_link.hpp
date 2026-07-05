@@ -34,6 +34,17 @@ struct OpticalLinkConfig {
     static constexpr int kAutoMaxResolution = -1;
     int camera_width = kAutoMaxResolution;
     int camera_height = kAutoMaxResolution;
+    // Defaults to false as of 2026-07-05 (see not_working.md): originally forced unconditionally,
+    // reasoning purely about USB bandwidth (raw YUY2 at high resolution can exceed what USB
+    // sustains). Fresh real-hardware logs show capture itself is fast (<1.5ms/frame) while decode
+    // *reliability* is poor (many retries, cascading AIMD downshifts that never stabilize) even
+    // though decode cost itself is stable — a symptom profile that MJPEG's lossy compression could
+    // directly explain: JPEG artifacts (ringing/blur) are well known to degrade exactly the sharp
+    // high-contrast edges a QR module boundary is. Same "opposite effects on different hardware"
+    // risk already seen with the resolution request below, so treated the same way: opt-in, with
+    // the negotiated fourcc always logged so a real per-machine comparison is possible instead of
+    // assumed either way.
+    bool request_mjpeg = false;
     // Optional diagnostics from the optical layer itself (distinct from ProtocolConfig::log):
     // whether the camera is detecting any QR content at all, and whether decoded text survives
     // frame validation. Wire it to the same sink as ProtocolConfig::log to see both in one place —

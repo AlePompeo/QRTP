@@ -6,6 +6,46 @@ session.
 
 ## Resolved
 
+### MJPEG (forced since v33) made opt-in — fresh log shows a reliability problem, not a speed one (2026-07-05)
+
+**Symptom**: user asked whether "~200 bytes per QR" was normal, then pasted a real diagnostic log
+(13110 bytes transferred in 33.6s). `avg_capture_ms` was consistently fast (~0.58-1.5ms) and
+`avg_decode_ms` was stable (~31-34ms) — capture and per-attempt decode cost were *not* the
+bottleneck. What stood out instead: `polls_since_last` climbing as high as 22, and a long chain of
+"splitting stuck offset" / "retransmit (severity=...)" events driving cascading AIMD downshifts
+(window 3->1, fps 11.06->6.94, chunk shrinking repeatedly) that never stabilized. That's a decode
+*reliability* problem (many frames never resolving at all, or only after many attempts), not a raw
+per-frame speed problem — a different failure mode than what MJPEG was originally forced for.
+
+**Reconsidered MJPEG (v33) under that lens**: it was forced unconditionally based on a USB-bandwidth
+argument (raw YUY2 at high resolution can exceed sustainable USB throughput, causing camera/driver
+stalling). That reasoning is still plausible for *capture* cost, but capture was already shown to be
+fast in this log — so if MJPEG is contributing to the slowness now, it's more likely via a completely
+different, previously-unexamined mechanism: JPEG's lossy compression is well known to introduce
+ringing/blur artifacts specifically on sharp, high-contrast edges — exactly what a QR module boundary
+is. That would directly explain poor decode reliability (many retries needed per frame) without
+touching the measured per-attempt decode or capture timings at all.
+
+**Fix**: same treatment already applied to camera resolution when it showed opposite effects on
+different hardware (see the COBS/resolution entries below) — made MJPEG opt-in instead of forced.
+Added `OpticalLinkConfig::request_mjpeg` (default `false`). `optical_link.cpp` now only calls
+`cap->set(CAP_PROP_FOURCC, MJPG)` when this flag is set; the "camera opened: resolution ... fourcc="
+log line now also reports whether MJPEG was requested, so a real per-machine comparison is possible.
+Wired through `--mjpeg` on both `qrtp send`/`qrtp receive`, and a new "Richiedi MJPEG" checkbox
+(unchecked by default) in the Win32 GUI, threaded through `RunTransfer`.
+
+**Verified**: `make test` (all checks pass), a full loopback demo transfer (byte-for-byte identical
+output + hash match), native build, and the OpenCV-enabled Windows cross-compile (all three .exe
+targets) all build/pass cleanly. NOT verified on real camera hardware (none available in this dev
+environment) — whether disabling MJPEG actually fixes the reliability problem is unconfirmed; this
+change only removes it as a forced, un-testable variable so the user can compare both ways.
+
+**Open question**: if throughput/reliability recovers with MJPEG off, that confirms the JPEG-
+artifact hypothesis and MJPEG should probably stay opt-in permanently (perhaps auto-enabled only at
+resolutions high enough that raw capture would genuinely throttle). If it doesn't recover, the
+`polls_since_last`/cascading-downshift pattern points somewhere else entirely — lighting, camera
+autofocus hunting, or screen refresh/GDI paint timing not yet instrumented.
+
 ### Still very slow after reverting fast retransmit — reverted fps_initial back to 3.0 too (2026-07-05)
 
 **Symptom**: after reverting fast retransmit (previous entry), the user reported the transfer was

@@ -143,11 +143,21 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
     // exactly this reason at anything beyond low resolutions; OpenCV's DirectShow backend doesn't
     // do this automatically unless asked. Set before the resolution request below, since some
     // backends only unlock a camera's higher-resolution modes once the pixel format is already
-    // negotiated. Unlike the resolution request itself, this isn't made opt-in: MJPEG is the
-    // near-universal standard high-resolution capture mode for UVC webcams specifically because of
-    // this exact USB bandwidth constraint, not a per-camera quirk — a camera without it would
-    // already struggle to offer high resolutions in any app, native or not.
-    cap(capture_)->set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+    // negotiated.
+    //
+    // Made opt-in (default off) as of 2026-07-05, reverting the earlier "always force it"
+    // reasoning above: a fresh real-hardware log showed capture staying fast (<1.5ms/frame)
+    // throughout, while decode *reliability* was poor (many retries, cascading AIMD downshifts
+    // that never stabilized) even though decode cost itself was stable — not the CPU/bandwidth
+    // symptom this was originally meant to fix. JPEG's lossy compression is a well-documented
+    // cause of ringing/blur on sharp high-contrast edges, exactly what a QR module boundary is, so
+    // it's now a live suspect for that reliability problem instead of a pure win. Resolution
+    // forcing already showed opposite effects on different camera hardware; this is the same risk
+    // shape, so it gets the same treatment — a per-machine opt-in, not a forced default — see
+    // request_mjpeg in optical_link.hpp.
+    if (cfg_.request_mjpeg) {
+        cap(capture_)->set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+    }
 
     // Three modes, by default requesting the camera's highest available mode automatically
     // (kAutoMaxResolution): OpenCV's base VideoCapture interface has no portable "list supported
@@ -187,7 +197,8 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
         cfg_.log("[optical] camera opened: resolution " +
                   std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_WIDTH))) + "x" +
                   std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_HEIGHT))) + requested_desc +
-                  " fourcc=" + std::string(fourcc_chars));
+                  " fourcc=" + std::string(fourcc_chars) +
+                  (cfg_.request_mjpeg ? " (mjpeg requested)" : " (mjpeg not requested)"));
     }
 
     capture_thread_ = new CaptureThread(cap(capture_));

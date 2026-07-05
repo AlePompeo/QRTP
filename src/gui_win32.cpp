@@ -49,6 +49,7 @@ constexpr int IDC_LOG_EDIT = 109;
 constexpr int IDC_STATUS_STATIC = 110;
 constexpr int IDC_RES_EDIT = 111;
 constexpr int IDC_QRGRID_EDIT = 112;
+constexpr int IDC_MJPEG_CHECK = 113;
 
 // Custom messages posted from the worker thread to the UI thread. Never touch a control directly
 // from the worker thread — Win32 windows are single-threaded-affine, all updates must happen here.
@@ -124,7 +125,7 @@ std::wstring BrowseForFolder(HWND owner) {
 
 // Runs on the worker thread. Never touches Win32 controls directly.
 void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_index, double fps, int camera_width,
-                  int camera_height, int qr_grid) {
+                  int camera_height, int qr_grid, bool request_mjpeg) {
     HWND hwnd = app->hwnd;
     auto post_log = [hwnd](const std::string& msg) {
         auto* copy = new std::wstring(Utf8ToWide(msg));
@@ -142,6 +143,7 @@ void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_in
         ocfg.camera_width = camera_width;
         ocfg.camera_height = camera_height;
         ocfg.qr_codes_per_frame = qr_grid;
+        ocfg.request_mjpeg = request_mjpeg;
         ocfg.log = post_log;
         qrtp::OpticalLink link(ocfg);
 
@@ -216,6 +218,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // needing a rebuild if it doesn't hold up on real hardware. Must match on both machines.
             mk(L"EDIT", L"1", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 130, 103, 50, 22, IDC_QRGRID_EDIT);
 
+            // Off by default as of 2026-07-05 (see OpticalLinkConfig::request_mjpeg): forced
+            // unconditionally before, but fresh real-hardware logs pointed at JPEG compression
+            // artifacts as a plausible cause of poor decode reliability. Opt-in per machine, same
+            // as the resolution field above — must match on both sides of the transfer.
+            mk(L"BUTTON", L"Richiedi MJPEG", BS_AUTOCHECKBOX, 200, 104, 160, 20, IDC_MJPEG_CHECK);
+
             mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 143, 100, 28, IDC_START_BTN);
             HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 143, 100, 28, IDC_STOP_BTN);
             EnableWindow(stop, FALSE);
@@ -277,6 +285,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 int qr_grid = GetDlgItemInt(hwnd, IDC_QRGRID_EDIT, nullptr, FALSE);
                 if (qr_grid <= 0) qr_grid = 1;
+                bool request_mjpeg = IsDlgButtonChecked(hwnd, IDC_MJPEG_CHECK) == BST_CHECKED;
 
                 SetWindowTextW(GetDlgItem(hwnd, IDC_LOG_EDIT), L"");
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), is_send ? L"Invio in corso..." : L"Ricezione in corso...");
@@ -287,7 +296,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 app->running.store(true);
                 if (app->worker.joinable()) app->worker.join(); // previous run already finished
                 app->worker = std::thread(RunTransfer, app, is_send, path_w, camera_index, fps, camera_width,
-                                           camera_height, qr_grid);
+                                           camera_height, qr_grid, request_mjpeg);
             } else if (id == IDC_STOP_BTN) {
                 app->cancel.store(true);
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), L"Arresto in corso...");
