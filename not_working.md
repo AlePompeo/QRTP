@@ -6,6 +6,41 @@ session.
 
 ## Resolved
 
+### Still very slow after the chunk_size_max revert — 13110 bytes in 47.24s at fps=48 despite fps_max=60 — the receiver's own reverse-channel AIMD was penalizing itself for forward-channel loss (2026-07-05)
+
+**Symptom**: real user report on the v16 build (chunk_size_max already reverted to 1500) — a
+13110-byte transfer took 47.24s, with the sender's fps only reaching 48 despite `fps_max=60` being
+configured. ~277 bytes/sec is far too slow to be explained by forward-channel display rate alone.
+
+**Root cause**: the v14 fix gave `Receiver` its own `AdaptiveController` driving its own SACK
+display fps/EC, fed by treating any incoming `DATA` frame's `RETRANSMIT` flag as a "loss event" for
+the *reverse* channel (severity defaulting to a full 1.0 — the maximum pullback the class supports).
+This conflated two different things: a `DATA` retransmit fires whenever the *sender's* RTO expires
+without an ACK, which happens just as often (in practice, more often) because the original `DATA`
+frame itself never reached the receiver at all — pure forward-channel loss, with nothing to do with
+whether the receiver's own SACK replies are getting through. Every such event still slammed the
+reverse channel's fps down by a full `*0.8`, and recovery required several consecutive genuinely
+clean SACK rounds (`fer_window=4`) to earn back — on a real, moderately lossy optical channel this
+meant the reverse channel spent much of the transfer near its `fps_min` floor (1.0, i.e. ~1 full
+second per SACK), regardless of how well the forward channel was actually doing. Every `DATA` frame
+requires exactly one SACK reply, so a reverse channel parked near 1fps caps the *entire* transfer at
+roughly one round trip per second — consistent with the reported numbers.
+
+**Fix**: removed the receiver's independent `AdaptiveController` entirely (was solving a real
+problem — the reverse channel needing to speed up — with a signal too weak and confounded to trust).
+Replaced it with direct mirroring: every `DATA` frame now piggybacks the sender's *current* fps/EC
+level in fields that carry no other meaning for that frame type (`ack_window` as `fps*100`
+fixed-point; the unused upper 2 bits of `flags_byte` for EC level) — see `encode_rate_hint`/
+`decode_fps_hint`/`decode_ec_hint` in `protocol.cpp`. The receiver applies these directly to its own
+link the instant a `DATA` frame arrives, before replying with a SACK. This reuses a rate the forward
+channel has *already just proven* works on this exact camera/lighting setup, for a channel carrying
+a smaller payload besides — no separate inference, no risk of the reverse channel being penalized
+for a forward-channel problem it had no part in.
+
+**Not yet confirmed by the user** — reasoned from the reported numbers and the confounded-signal
+analysis above, not from fresh diagnostic logs. `make test` and a full loopback demo transfer
+(byte-for-byte + hash match) both pass after the change.
+
 ### Throughput got much worse (not better) after raising chunk_size_max to 2048 — capacity math ignored real decode/render cost (2026-07-05)
 
 **Symptom**: real user report after the v14 "optimize throughput" pass — performance dropped a lot
