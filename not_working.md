@@ -6,6 +6,41 @@ session.
 
 ## Resolved
 
+### A completed transfer reported a hash mismatch — stale duplicate of a since-split offset silently corrupted reassembly (2026-07-05)
+
+**Symptom**: a real transfer ran all the way to `all N bytes acked, tearing down` on the sender
+side — every byte offset got a confirmed ack — but the receiver reported `HASH MISMATCH`. All the
+data arrived; the reassembled content was wrong anyway.
+
+**Root cause**: introduced by the offset-splitting fix above. When a stuck offset gets split into
+smaller pieces, the *first* sub-piece reuses the exact same starting byte offset as the original
+(unsplit) frame — it has to, since that's genuinely where that piece of the file begins. If a
+stale/delayed copy of the *original* (larger) frame is still captured by the camera *after* the
+sender has already moved on to displaying the smaller replacement pieces (plausible: camera driver
+buffering, or the display not having visually updated yet at the exact instant of the capture),
+`chunks[offset] = f->payload` blindly overwrote the already-correct smaller piece with the stale
+larger one. No CRC catches this — the stale frame is perfectly well-formed and internally
+consistent, just outdated relative to the sender's current (finer) chunking decision. The final
+reassembly then concatenated the wrong bytes at that position, corrupting the whole file's hash
+despite every offset technically being "acked."
+
+**Fix**: the receiver now rejects two categories of stale data for `DATA` frames:
+1. Anything at a byte offset already folded into the confirmed cumulative prefix (that data is
+   locked in and must never change again).
+2. For any offset not yet confirmed: if something is already stored there and a *new* arrival is
+   **larger** than what's already stored, reject it. Re-chunking only ever produces smaller pieces,
+   never grows one back — so a larger arrival after a smaller one is definitionally a stale
+   straggler, never a legitimate update.
+
+**Not yet re-confirmed by the user** for a large file specifically (this was diagnosed from a log
+where the corruption's exact origin — the `splitting stuck offset 43841` event — aligned with where
+the receiver's log excerpt didn't show corresponding activity, consistent with but not 100%
+pinpointed to this exact race by direct before/after comparison). The fix is verified sound by
+exhaustive manual reasoning through the offset-locking + prefer-smaller interaction (see the commit
+message), and the full randomized end-to-end loopback test continues to pass, but a dedicated
+regression test reproducing this exact race directly would be a good addition — not done yet, since
+it requires hand-driving frame sequencing past the normal Sender/Receiver API.
+
 ### First confirmed successful end-to-end transfer (small file) — but large files appear to freeze partway through (2026-07-05)
 
 **Good news first**: with the offset-splitting fix, the user completed a full, successful transfer

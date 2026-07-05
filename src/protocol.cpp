@@ -396,8 +396,28 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
             if (f->type == FrameType::DATA) {
                 log("DATA received: offset=" + std::to_string(f->seq) + " len=" + std::to_string(f->payload.size()) +
                     " cumulative_before=" + std::to_string(cumulative));
-                chunks[f->seq] = f->payload; // idempotent: retransmits just overwrite identical bytes
-                advance_cumulative();
+                if (static_cast<uint64_t>(f->seq) >= cumulative) {
+                    // Re-chunking (protocol.cpp: Sender splits a stuck offset into smaller pieces)
+                    // only ever shrinks a chunk, never grows one back — so if we already have
+                    // something stored at this exact offset and the new arrival is *larger*, it can
+                    // only be a stale straggler of a since-superseded, now-obsolete larger frame
+                    // (e.g. a camera frame buffered from just before the sender re-chunked this
+                    // offset). Accepting it would silently corrupt an already-correct, more
+                    // fine-grained reassembly with no CRC to catch it — the stale frame is itself
+                    // perfectly valid, just outdated. Smaller-or-equal always wins.
+                    auto existing = chunks.find(f->seq);
+                    if (existing == chunks.end() || f->payload.size() <= existing->second.size()) {
+                        chunks[f->seq] = f->payload;
+                    } else {
+                        log("ignoring stale larger frame at offset " + std::to_string(f->seq) + " (" +
+                            std::to_string(f->payload.size()) + " bytes, already have " +
+                            std::to_string(existing->second.size()) + ")");
+                    }
+                    advance_cumulative();
+                }
+                // else: offset already confirmed past cumulative -- a stale duplicate; ignore its
+                // payload entirely (never let already-locked-in reassembly data change), but still
+                // fall through below so the sender gets an ack either way.
                 ++frames_since_sack;
                 // A RETRANSMIT flag means the sender's window is starved for feedback (this is
                 // most visible once the window has shrunk to 1: with only one frame ever in
