@@ -199,13 +199,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             mk(L"STATIC", L"FPS:", 0, 175, 80, 40, 20, 0);
             mk(L"EDIT", L"3", WS_BORDER | ES_AUTOHSCROLL, 220, 77, 50, 22, IDC_FPS_EDIT);
             mk(L"STATIC", L"Ris. (LxA):", 0, 285, 80, 85, 20, 0);
-            // Pre-filled with 1280x720 — the automatic default (see OpticalLinkConfig): OpenCV's
-            // DirectShow backend otherwise tends to settle for a conservative default (often
-            // 640x480) well below what the camera actually supports. Editable per machine: type a
-            // different WxH to try that instead, or "0x0" to skip the request entirely and leave
-            // the camera fully alone — real hardware testing showed the exact same request can be
-            // honored cleanly by one camera and remapped to a worse mode by another.
-            mk(L"EDIT", L"1280x720", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
+            // Pre-filled with "max" — the automatic default (see OpticalLinkConfig::
+            // kAutoMaxResolution): requests the camera's own highest available mode. Editable per
+            // machine: type a specific WxH (e.g. "1280x720") to request that instead, or "0x0" to
+            // skip any request and leave the camera fully alone — real hardware testing showed the
+            // exact same fixed-resolution request can be honored cleanly by one camera and remapped
+            // to a worse mode by another.
+            mk(L"EDIT", L"max", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
 
             mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 115, 100, 28, IDC_START_BTN);
             HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 115, 100, 28, IDC_STOP_BTN);
@@ -245,16 +245,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 double fps = wcstod(fps_buf, nullptr);
                 if (fps <= 0.0) fps = 3.0;
 
-                // Optional "WxH" (e.g. "1280x720"); left blank, both stay 0 and OpticalLink leaves
-                // the camera's resolution alone (see the field's own comment above for why this is
-                // opt-in rather than an automatic default).
-                int camera_width = 0, camera_height = 0;
+                // "max" or blank (the default) -> auto-detect the camera's highest mode; "0x0" ->
+                // skip any request and leave the camera fully alone; any other "WxH" -> request
+                // that specific resolution. See OpticalLinkConfig::kAutoMaxResolution.
+                int camera_width = qrtp::OpticalLinkConfig::kAutoMaxResolution;
+                int camera_height = qrtp::OpticalLinkConfig::kAutoMaxResolution;
                 wchar_t res_buf[32];
                 GetDlgItemTextW(hwnd, IDC_RES_EDIT, res_buf, 32);
-                if (const wchar_t* x_pos = wcschr(res_buf, L'x')) {
-                    camera_width = _wtoi(res_buf);
-                    camera_height = _wtoi(x_pos + 1);
-                    if (camera_width <= 0 || camera_height <= 0) camera_width = camera_height = 0;
+                if (res_buf[0] != L'\0' && _wcsicmp(res_buf, L"max") != 0) {
+                    if (const wchar_t* x_pos = wcschr(res_buf, L'x')) {
+                        camera_width = _wtoi(res_buf);
+                        camera_height = _wtoi(x_pos + 1);
+                        if (camera_width < 0 || camera_height < 0) {
+                            camera_width = qrtp::OpticalLinkConfig::kAutoMaxResolution;
+                            camera_height = qrtp::OpticalLinkConfig::kAutoMaxResolution;
+                        }
+                    } else {
+                        camera_width = qrtp::OpticalLinkConfig::kAutoMaxResolution;
+                        camera_height = qrtp::OpticalLinkConfig::kAutoMaxResolution;
+                    }
                 }
 
                 SetWindowTextW(GetDlgItem(hwnd, IDC_LOG_EDIT), L"");

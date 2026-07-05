@@ -133,17 +133,32 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
     // doesn't honor is simply ignored, same as any other capability request here.
     cap(capture_)->set(cv::CAP_PROP_BUFFERSIZE, 1);
 
-    // Requests a resolution whenever both dimensions are positive — true by default (1280x720,
-    // see OpticalLinkConfig), since OpenCV's DirectShow backend otherwise tends to settle for a
-    // conservative default (often 640x480) well below what the camera actually supports. Real
-    // two-machine hardware data showed the exact same request can be honored cleanly by one
-    // camera and remapped to a different, worse-performing mode by another, so CLI --width/--height
-    // (or the GUI's field) let this be overridden per machine — including to 0x0, which skips the
-    // request entirely and leaves the camera fully alone, for hardware where forcing anything
-    // backfires.
-    if (cfg_.camera_width > 0 && cfg_.camera_height > 0) {
+    // Three modes, by default requesting the camera's highest available mode automatically
+    // (kAutoMaxResolution): OpenCV's base VideoCapture interface has no portable "list supported
+    // resolutions" call (that's backend-specific, e.g. DirectShow's IAMStreamConfig, real COM
+    // interop this codebase doesn't otherwise need), so this asks for an intentionally oversized
+    // resolution and lets the driver clamp it to its true native maximum — a common, well-
+    // documented technique for exactly this. NOTE this is a real, deliberate trade: a higher-
+    // resolution frame is *more* expensive for cv::QRCodeDetector to scan per attempt (real timing
+    // data suggests its cost tracks the captured frame's size, not just the QR's own module
+    // count), so this can make each individual decode attempt slower even as it may (unverified)
+    // reduce failed/retried attempts from a sharper image. CLI --width/--height (or the GUI field)
+    // override this per machine: a specific positive WxH requests exactly that, and 0x0 skips any
+    // request and leaves the camera fully alone.
+    std::string requested_desc;
+    if (cfg_.camera_width == OpticalLinkConfig::kAutoMaxResolution &&
+        cfg_.camera_height == OpticalLinkConfig::kAutoMaxResolution) {
+        constexpr int kOversized = 10000; // comfortably beyond any consumer webcam's native mode
+        cap(capture_)->set(cv::CAP_PROP_FRAME_WIDTH, kOversized);
+        cap(capture_)->set(cv::CAP_PROP_FRAME_HEIGHT, kOversized);
+        requested_desc = " (requested auto-max)";
+    } else if (cfg_.camera_width > 0 && cfg_.camera_height > 0) {
         cap(capture_)->set(cv::CAP_PROP_FRAME_WIDTH, cfg_.camera_width);
         cap(capture_)->set(cv::CAP_PROP_FRAME_HEIGHT, cfg_.camera_height);
+        requested_desc =
+            " (requested " + std::to_string(cfg_.camera_width) + "x" + std::to_string(cfg_.camera_height) + ")";
+    } else {
+        requested_desc = " (no resolution requested)";
     }
     if (cfg_.log) {
         // Always reports what the camera actually negotiated, not just what (if anything) was
@@ -151,11 +166,7 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
         // is the only way to know what's really in effect.
         cfg_.log("[optical] camera opened: resolution " +
                   std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_WIDTH))) + "x" +
-                  std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_HEIGHT))) +
-                  (cfg_.camera_width > 0 && cfg_.camera_height > 0
-                       ? " (requested " + std::to_string(cfg_.camera_width) + "x" +
-                             std::to_string(cfg_.camera_height) + ")"
-                       : " (no resolution requested)"));
+                  std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_HEIGHT))) + requested_desc);
     }
 
     capture_thread_ = new CaptureThread(cap(capture_));

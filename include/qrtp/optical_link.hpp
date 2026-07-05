@@ -17,16 +17,19 @@ struct OpticalLinkConfig {
     // algorithm lock on; 10fps (100ms/frame) proved too fast for real hardware in testing.
     double fps = 3.0;
     QrEcLevel ec_level = QrEcLevel::M;
-    // Defaults to requesting 1280x720 automatically — OpenCV's DirectShow backend otherwise tends
-    // to negotiate a conservative default (often 640x480) regardless of what the camera actually
-    // supports (see not_working.md, 2026-07-05). Set either to 0 (or both) to leave the camera
-    // alone entirely, or to any other positive WxH to request a specific resolution instead — a
-    // real per-machine escape hatch, since testing showed the exact same request can be honored
-    // cleanly by one camera and remapped to a different, worse-performing mode by another. The
-    // actual negotiated size (which a camera can still override regardless of what's requested) is
-    // always logged, so what really happened is never just assumed.
-    int camera_width = 1280;
-    int camera_height = 720;
+    // Defaults to kAutoMaxResolution (both), which requests the camera's own highest available
+    // mode automatically (see OpticalLink's constructor for how — OpenCV has no portable "list
+    // supported resolutions" API, so this asks for an intentionally oversized resolution and reads
+    // back whatever the driver actually clamps to). Set both to 0 to leave the camera alone
+    // entirely (its own default, without any request — see not_working.md, 2026-07-05, for why
+    // that's sometimes a conservative mode like 640x480), or to any other positive WxH to request a
+    // specific resolution instead. A real per-machine escape hatch either way: testing showed the
+    // exact same fixed-resolution request can be honored cleanly by one camera and remapped to a
+    // different, worse-performing mode by another — the actual negotiated size (which a camera can
+    // still override regardless of what's requested) is always logged, never just assumed.
+    static constexpr int kAutoMaxResolution = -1;
+    int camera_width = kAutoMaxResolution;
+    int camera_height = kAutoMaxResolution;
     // Optional diagnostics from the optical layer itself (distinct from ProtocolConfig::log):
     // whether the camera is detecting any QR content at all, and whether decoded text survives
     // frame validation. Wire it to the same sink as ProtocolConfig::log to see both in one place —

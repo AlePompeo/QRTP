@@ -56,14 +56,13 @@ struct AdaptiveConfig {
     double rto_min_ms = 50.0;
 
     // Rolling frame-error-rate at/below which we upshift, and how many recent rounds it's computed
-    // over. Was fer_window=8/fer_low=0.15 ("at most ~1 bad round out of 8") — correct in spirit,
-    // but recovering from any single isolated hiccup then required re-earning a fresh 8-round clean
-    // streak from scratch before the *next* upshift could fire, which on a large file with
-    // occasional isolated blips (not sustained loss) spent a lot of time re-proving reliability
-    // instead of transferring. fer_window=4/fer_low=0.25 keeps the same "~1 bad in N" tolerance
-    // ratio but halves how long each recovery takes to re-qualify.
-    double fer_low = 0.25;
-    size_t fer_window = 4;
+    // over. History: fer_window=8/fer_low=0.15 -> 4/0.25 (each halving keeps the same "~1 bad in N"
+    // tolerance ratio while halving how long a recovery takes to re-qualify for the next upshift).
+    // 4/0.25 -> 3/0.34 continues that same pattern once more, on top of upshift() itself now also
+    // growing window/chunk/fps faster per event (see adaptive.cpp) — both dials (how often it's
+    // allowed to upshift, and how much each one grows) move together rather than only one of them.
+    double fer_low = 0.34;
+    size_t fer_window = 3;
 };
 
 // AIMD controller: reuses TCP congestion-control intuition, re-targeted at an optical channel.

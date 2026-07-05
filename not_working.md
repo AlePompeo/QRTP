@@ -6,6 +6,48 @@ session.
 
 ## Resolved
 
+### User request: auto-detect the camera's highest-quality mode, and speed up AIMD ramp-up (2026-07-05)
+
+Decoding was reported as still very slow. Two explicit asks:
+
+**1. Camera resolution: automatic, at the highest available quality.** OpenCV's base
+`VideoCapture` has no portable "list supported modes" call (that's backend-specific — e.g.
+DirectShow's `IAMStreamConfig`, real COM interop this codebase otherwise avoids). Used the
+common workaround instead: request an intentionally oversized resolution (10000x10000) and read
+back whatever the driver actually clamps to, which is normally its true native maximum.
+`OpticalLinkConfig::camera_width`/`camera_height` now default to a new `kAutoMaxResolution` (-1)
+sentinel that triggers this; `0`/`0` still means "don't touch it," and any specific positive WxH
+still requests exactly that (CLI `--width`/`--height`, GUI field now shows "max" instead of a
+fixed "1280x720").
+
+**Flagged directly rather than implemented silently**: this is a real, deliberate trade, not a
+clear win. Real timing data from this session showed `avg_decode_ms` roughly flat across QR
+*module* count (versions 3-15) but didn't rule out — and some evidence suggests — that
+`cv::QRCodeDetector`'s cost tracks the *captured frame's own resolution*. Requesting the camera's
+maximum quality means a bigger frame for the detector to scan on every single attempt, which could
+make each decode slower even if a sharper image reduces how often decoding fails and needs
+retrying (neither side of that trade is verified yet). The escape hatch (`0x0` or a specific lower
+WxH) is what makes this safely reversible per machine if it turns out to hurt more than help.
+
+**2. Speed up how fast the AIMD ramps up.** Moved two dials together instead of just one:
+- *How often it's allowed to check*: `fer_window`/`fer_low` 4/0.25 -> 3/0.34 — continues the same
+  halving pattern already used twice before (8/0.15 -> 4/0.25), keeping the same "~1 bad round in
+  N is fine" tolerance ratio while cutting the re-qualification window further.
+- *How much each upshift grows*: chunk size growth ~10%+1 -> ~20%+1 per event; fps growth
+  `*1.25+0.5` -> `*1.4+0.5`; window size growth changed from a flat `+1` (which lagged chunk/fps's
+  already-multiplicative climb, taking up to ~60 events to reach `window_max=64`) to the same
+  proportional shape (`+25%+1`) chunk/fps already use.
+
+Both dials were moved together deliberately — only widening the re-qualification window without
+also increasing the per-event growth (or vice versa) would have been a half-measure.
+
+**Verified**: `make test` (including `test_adaptive_aimd`, which checks growth/shrink direction
+rather than exact values, so it isn't sensitive to the specific rates changed here), a full
+randomized loopback transfer (byte-for-byte + hash match), native build, and the OpenCV-enabled
+Windows cross-compile all pass/build cleanly. **Not verified on real hardware** for either change
+— same outstanding confirmation as the rest of this arc, and this time genuinely two-sided for the
+resolution change specifically (it's not obviously a win, unlike most of the other fixes here).
+
 ### Revisited chunk_size_max with the considerations it deserved this time — raised to 1500, plus a real latent bug fixed along the way (2026-07-05)
 
 User asked whether more bytes/frame could be embedded to speed up large-file transfers — the same

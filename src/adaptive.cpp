@@ -80,7 +80,13 @@ void AdaptiveController::record_loss_event(double severity) {
 }
 
 void AdaptiveController::upshift() {
-    if (window_size_ < cfg_.window_max) ++window_size_;
+    // Proportional (~25% + 1), matching chunk_size's/fps's own growth shape below instead of a
+    // flat +1 — window_max=64 from window_initial=4 took up to 60 individual upshift events to
+    // reach at a flat rate, meaningfully lagging chunk/fps's already-multiplicative climb for no
+    // real reason.
+    if (window_size_ < cfg_.window_max) {
+        window_size_ = std::min(cfg_.window_max, window_size_ + window_size_ / 4 + 1);
+    }
 
     // Never grow past what the *current* EC level can actually encode, even if chunk_size_max
     // allows more — see max_chunk_for_ec_level's comment for why this matters. This is the
@@ -89,7 +95,8 @@ void AdaptiveController::upshift() {
     // higher ceiling for the next upshift.
     const size_t chunk_ceiling = std::min(cfg_.chunk_size_max, max_chunk_for_ec_level(ec_level_));
     if (chunk_size_ < chunk_ceiling) {
-        chunk_size_ = std::min(chunk_ceiling, chunk_size_ + chunk_size_ / 10 + 1);
+        // ~20% + 1 per event, up from ~10% + 1 — faster climb once a clean streak re-qualifies.
+        chunk_size_ = std::min(chunk_ceiling, chunk_size_ + chunk_size_ / 5 + 1);
     } else if (ec_level_ != ECLevel::L) {
         ec_level_ = static_cast<ECLevel>(static_cast<uint8_t>(ec_level_) - 1);
     }
@@ -99,8 +106,8 @@ void AdaptiveController::upshift() {
     // to the old fps_max of 15 (now 60), each gated behind re-qualifying with a clean streak. At
     // a fixed +1 that's an eternity for a channel that's actually reliable; growing by a fraction
     // of the current value ramps up fast early (when it matters most) while still tapering off
-    // smoothly near the ceiling.
-    if (fps_ < cfg_.fps_max) fps_ = std::min(cfg_.fps_max, fps_ * 1.25 + 0.5);
+    // smoothly near the ceiling. *1.4 (was *1.25): faster climb per event, same shape.
+    if (fps_ < cfg_.fps_max) fps_ = std::min(cfg_.fps_max, fps_ * 1.4 + 0.5);
 }
 
 void AdaptiveController::downshift(double severity) {
