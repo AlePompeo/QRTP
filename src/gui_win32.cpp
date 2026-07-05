@@ -201,7 +201,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             mk(L"STATIC", L"Ris. (LxA):", 0, 285, 80, 85, 20, 0);
             // Blank by default = leave the camera's own resolution alone (see OpticalLinkConfig —
             // forcing one automatically was tried and helped one camera while hurting another on
-            // real hardware). Opt-in: fill in e.g. "1280x720" to try a specific one on this machine.
+            // real hardware). Opt-in: fill in e.g. "1280x720" to try a specific one on this
+            // machine. The log's "camera opened: resolution ..." line reports whatever the
+            // camera/driver negotiates when this is left blank — on some hardware that's a
+            // conservative default like 640x480 even though the camera supports much more; this
+            // field is exactly how to ask for higher instead of assuming the default is the max.
             mk(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
 
             mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 115, 100, 28, IDC_START_BTN);

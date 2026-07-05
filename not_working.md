@@ -6,6 +6,28 @@ session.
 
 ## Resolved
 
+### After making resolution opt-in, the camera always opens at 640x480 — not a bug, OpenCV/DirectShow's own conservative default (2026-07-05)
+
+**Symptom**: user report right after the resolution field became opt-in (blank = don't touch
+anything) — the camera now consistently opens at 640x480 "automatically."
+
+**Investigated, not a bug**: re-read the GUI/CLI parsing logic carefully — when the field/flag is
+left blank, `camera_width`/`camera_height` both stay `0`, and `OpticalLink`'s constructor only
+calls `cap->set(CAP_PROP_FRAME_WIDTH/HEIGHT, ...)` when *both* are `> 0`. No path forces 640x480.
+What's actually happening: OpenCV's DirectShow backend (`cv::CAP_DSHOW`, used on Windows) is
+well known to negotiate a conservative default resolution — often exactly 640x480 — when no
+format is explicitly requested, *regardless of what the camera actually supports*. This was
+always true, on every previous version too; it only became *visible* once the "camera opened:
+resolution ..." log line was added in v21, so it looks new but isn't. It's also consistent with
+already-seen evidence: in the v21 test, the sending machine's camera *did* successfully negotiate
+1280x720 the moment it was explicitly requested — proof the camera itself isn't limited to
+640x480, OpenCV just doesn't reach for anything higher on its own.
+
+**No code fix needed** — this is exactly the scenario the opt-in `--width`/`--height` (CLI) /
+"Ris. (LxA)" (GUI) fields exist for. Clarified the CLI help text and the GUI field's code comment
+to say this explicitly, so the next person hitting the same "why is it always 640x480" question
+finds the answer already written down.
+
 ### General CPU/hardware optimization pass: unoptimized build discovered, capture/decode pipelined across threads, camera resolution made opt-in (2026-07-05)
 
 User asked for a broader sweep: anything else optimizable at the OpenCV/CPU/GPU/hardware level to

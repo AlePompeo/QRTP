@@ -34,9 +34,12 @@ void print_usage() {
         "      Send over the real optical link: renders QR frames to a window and reads\n"
         "      ACKs/SACKs back from camera index N (the peer's screen must face this camera).\n"
         "      --width/--height request a capture resolution from the camera — opt-in only\n"
-        "      (default: leave the camera's own default alone). Must give both together.\n"
-        "      Real hardware testing showed this can help one camera and hurt another, so try it\n"
-        "      on your own setup rather than assuming a value that worked elsewhere will too.\n\n"
+        "      (default: leave the camera alone; check the logged \"camera opened: resolution\n"
+        "      ...\" line to see what that turns out to be — on some hardware it's a\n"
+        "      conservative default like 640x480 even when the camera supports far more).\n"
+        "      Must give both together. Real hardware testing showed forcing one automatically\n"
+        "      for everyone can help one camera and hurt another, so try it on your own setup\n"
+        "      rather than assuming a value that worked elsewhere will too.\n\n"
         "  qrtp receive --out <dir> [--camera N] [--fps F] [--width W --height H]\n"
         "      Receive over the real optical link. Same --width/--height caveat as above.\n");
 #else
