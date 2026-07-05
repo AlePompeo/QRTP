@@ -31,6 +31,7 @@ void print_usage() {
         "      synthetic loss/corruption (P in [0,1]). No camera/monitor required.\n\n"
 #ifdef QRTP_WITH_OPENCV
         "  qrtp send <file> [--camera N] [--fps F] [--width W --height H] [--qr-grid N] [--no-mjpeg]\n"
+        "                   [--lock-focus]\n"
         "      Send over the real optical link: renders QR frames to a window and reads\n"
         "      ACKs/SACKs back from camera index N (the peer's screen must face this camera).\n"
         "      --qr-grid N (default 1, classic/original behavior) batches N frames into a single\n"
@@ -53,11 +54,17 @@ void print_usage() {
         "      raw/uncompressed capture costing ~100x more per frame on at least one camera, with\n"
         "      no reliability benefit from disabling it). Pass --no-mjpeg to request raw capture\n"
         "      instead, if a specific camera does better with it — check the logged \"fourcc=\" /\n"
-        "      avg_capture_ms stats to compare.\n\n"
+        "      avg_capture_ms stats to compare.\n"
+        "      --lock-focus disables continuous autofocus after opening the camera (off by\n"
+        "      default). Experimental: a real log showed avg_capture_ms/avg_decode_ms dropping\n"
+        "      together sharply right at a fps transition on a genuine two-machine setup, which\n"
+        "      doesn't fit pure camera-hardware cost — continuous autofocus hunting under fast-\n"
+        "      changing on-screen content is one candidate explanation; not yet confirmed on real\n"
+        "      hardware.\n\n"
         "  qrtp receive --out <dir> [--camera N] [--fps F] [--width W --height H] [--qr-grid N]\n"
-        "                          [--no-mjpeg]\n"
-        "      Receive over the real optical link. Same --width/--height, --qr-grid and --no-mjpeg\n"
-        "      notes as above.\n");
+        "                          [--no-mjpeg] [--lock-focus]\n"
+        "      Receive over the real optical link. Same --width/--height, --qr-grid, --no-mjpeg and\n"
+        "      --lock-focus notes as above.\n");
 #else
         "  qrtp send / qrtp receive\n"
         "      Not available in this build — rebuild with `make WITH_OPENCV=1` after\n"
@@ -151,6 +158,7 @@ int cmd_send_optical(int argc, char** argv) {
         else if (a == "--height" && i + 1 < argc) ocfg.camera_height = std::stoi(argv[++i]);
         else if (a == "--qr-grid" && i + 1 < argc) ocfg.qr_codes_per_frame = std::stoi(argv[++i]);
         else if (a == "--no-mjpeg") ocfg.request_mjpeg = false;
+        else if (a == "--lock-focus") ocfg.disable_autofocus = true;
     }
     try {
         ocfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
@@ -178,6 +186,7 @@ int cmd_receive_optical(int argc, char** argv) {
         else if (a == "--height" && i + 1 < argc) ocfg.camera_height = std::stoi(argv[++i]);
         else if (a == "--qr-grid" && i + 1 < argc) ocfg.qr_codes_per_frame = std::stoi(argv[++i]);
         else if (a == "--no-mjpeg") ocfg.request_mjpeg = false;
+        else if (a == "--lock-focus") ocfg.disable_autofocus = true;
         else if (a == "--out" && i + 1 < argc) out_dir = argv[++i];
     }
     try {

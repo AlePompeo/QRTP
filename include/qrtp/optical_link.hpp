@@ -50,6 +50,23 @@ struct OpticalLinkConfig {
     // disagree about what capture mode works best for them — this just changes which side of that
     // toggle is the default given the evidence so far.
     bool request_mjpeg = true;
+    // Opt-in, default false (2026-07-05): a real log showed avg_capture_ms and avg_decode_ms
+    // dropping together sharply (~103-134ms -> ~27-40ms) exactly when the transfer fell into a
+    // low-fps single-offset retransmit loop after a string of stuck-offset splits, then staying low
+    // even after fps climbed back up — on a two-separate-machines setup (confirmed with the user),
+    // which rules out CPU contention between the sender and receiver process sharing one machine's
+    // cores as the explanation. cap->read() latency shouldn't depend on our chunk/window/fps choices
+    // at all if it's purely camera-hardware-bound, so a correlation this tight with our own fps
+    // transitions instead points at the *camera's own* auto-exposure/autofocus control loop hunting
+    // under rapidly-changing on-screen content (different QR codes flashing by at higher fps shift
+    // average scene brightness/contrast quickly) — a well-documented source of variable capture
+    // latency in UVC webcams. Untested here (no camera hardware in this dev environment): when true,
+    // requests CAP_PROP_AUTOFOCUS=0 right after opening the camera, disabling continuous refocusing
+    // for the rest of the session. Deliberately narrower than also touching exposure: a wrong manual
+    // exposure value picked blindly could make the picture too dark/bright on an unknown camera,
+    // whereas autofocus off is a simple on/off UVC control with no numeric value to get wrong — if
+    // this doesn't help, exposure is the next, riskier knob to consider.
+    bool disable_autofocus = false;
     // Optional diagnostics from the optical layer itself (distinct from ProtocolConfig::log):
     // whether the camera is detecting any QR content at all, and whether decoded text survives
     // frame validation. Wire it to the same sink as ProtocolConfig::log to see both in one place —

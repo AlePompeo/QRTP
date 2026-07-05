@@ -6,6 +6,42 @@ session.
 
 ## Resolved
 
+### Added opt-in autofocus lock to test the still-open capture/decode latency correlation (2026-07-05)
+
+**Context**: the previous entry left an open question — in the MJPEG-off log, `avg_capture_ms` and
+`avg_decode_ms` both dropped sharply and together (~103-134ms -> ~27-40ms) exactly when the
+transfer fell into a low-fps single-offset retransmit loop, with two candidate explanations: camera
+auto-exposure/autofocus hunting under fast-changing on-screen content, or CPU contention if sender
+and receiver were sharing one machine's cores. Asked the user directly: confirmed **two separate
+physical machines** for this test. That rules out the CPU-contention explanation — each process has
+its own cores — leaving camera-side auto-exposure/autofocus hunting as the standing hypothesis
+(cap->read() latency shouldn't depend on our own chunk/window/fps choices at all if it's purely
+hardware-bound, so a correlation this tight with our own fps transitions points at the camera
+reacting to the *content* those transitions produce, not at anything downstream of capture).
+
+**Fix**: added `OpticalLinkConfig::disable_autofocus` (opt-in, default `false` — untested on real
+hardware, unlike the MJPEG default flip above which reflected a confirmed A/B). When true, requests
+`CAP_PROP_AUTOFOCUS=0` right after opening the camera, disabling continuous refocusing for the rest
+of the session. Deliberately narrower than also touching exposure: a manual exposure value picked
+blindly (no camera hardware available here to tune one) could make the picture too dark or too
+bright on an unknown camera, whereas autofocus off is a simple on/off UVC control with no numeric
+guess involved — if this doesn't change anything, exposure is the next, riskier knob to consider.
+Wired through `--lock-focus` on both `qrtp send`/`qrtp receive`, and a new "Blocca autofocus"
+checkbox (unchecked by default) in the Win32 GUI, threaded through `RunTransfer`. The "camera
+opened" log line now also reports whether autofocus was left on or disabled.
+
+**Verified**: `make test`, a full loopback demo transfer (byte-for-byte identical + hash match),
+native build, and the Windows cross-compile (all three .exe targets, including the resized GUI
+layout) all build/pass cleanly. NOT verified on real camera hardware — whether autofocus hunting is
+actually the cause of the capture/decode latency correlation is still an open question; this only
+makes it testable without a rebuild.
+
+**Next step**: user should try `--lock-focus` (or the GUI checkbox) on the same kind of transfer
+that showed the capture/decode latency dropping at a fps transition, and report whether the
+avg_capture_ms/avg_decode_ms values stay flat across fps changes instead of tracking them. If yes,
+this confirms autofocus hunting and the lock can likely become the default too, matching MJPEG's
+path. If no, revisit the exposure-lock idea, or look at screen refresh/GDI paint timing instead.
+
 ### MJPEG A/B test concluded: re-enabled by default, JPEG-artifact theory did not hold up (2026-07-05)
 
 **Symptom**: after making MJPEG opt-in (default off, previous entry), the user tested and pasted a

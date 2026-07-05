@@ -50,6 +50,7 @@ constexpr int IDC_STATUS_STATIC = 110;
 constexpr int IDC_RES_EDIT = 111;
 constexpr int IDC_QRGRID_EDIT = 112;
 constexpr int IDC_MJPEG_CHECK = 113;
+constexpr int IDC_FOCUS_CHECK = 114;
 
 // Custom messages posted from the worker thread to the UI thread. Never touch a control directly
 // from the worker thread — Win32 windows are single-threaded-affine, all updates must happen here.
@@ -125,7 +126,7 @@ std::wstring BrowseForFolder(HWND owner) {
 
 // Runs on the worker thread. Never touches Win32 controls directly.
 void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_index, double fps, int camera_width,
-                  int camera_height, int qr_grid, bool request_mjpeg) {
+                  int camera_height, int qr_grid, bool request_mjpeg, bool disable_autofocus) {
     HWND hwnd = app->hwnd;
     auto post_log = [hwnd](const std::string& msg) {
         auto* copy = new std::wstring(Utf8ToWide(msg));
@@ -144,6 +145,7 @@ void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_in
         ocfg.camera_height = camera_height;
         ocfg.qr_codes_per_frame = qr_grid;
         ocfg.request_mjpeg = request_mjpeg;
+        ocfg.disable_autofocus = disable_autofocus;
         ocfg.log = post_log;
         qrtp::OpticalLink link(ocfg);
 
@@ -226,13 +228,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             mk(L"BUTTON", L"Richiedi MJPEG", BS_AUTOCHECKBOX, 200, 104, 160, 20, IDC_MJPEG_CHECK);
             CheckDlgButton(hwnd, IDC_MJPEG_CHECK, BST_CHECKED);
 
-            mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 143, 100, 28, IDC_START_BTN);
-            HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 143, 100, 28, IDC_STOP_BTN);
+            // Unchecked by default (see OpticalLinkConfig::disable_autofocus): untested on real
+            // hardware, unlike the MJPEG checkbox above which reflects a confirmed A/B result.
+            // Offered as the next experiment for the still-open avg_capture_ms/avg_decode_ms
+            // correlation-with-fps question (not_working.md, 2026-07-05) — autofocus hunting under
+            // fast-changing on-screen content is a candidate, not a confirmed fix.
+            mk(L"BUTTON", L"Blocca autofocus", BS_AUTOCHECKBOX, 10, 127, 160, 20, IDC_FOCUS_CHECK);
+
+            mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 163, 100, 28, IDC_START_BTN);
+            HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 163, 100, 28, IDC_STOP_BTN);
             EnableWindow(stop, FALSE);
-            mk(L"STATIC", L"Pronto.", 0, 235, 148, 260, 20, IDC_STATUS_STATIC);
+            mk(L"STATIC", L"Pronto.", 0, 235, 168, 260, 20, IDC_STATUS_STATIC);
 
             HWND log_edit = mk(L"EDIT", L"",
-                                WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 183, 485,
+                                WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 203, 485,
                                 220, IDC_LOG_EDIT);
             // Default EDIT control limit is ~32K characters; past that it silently stops accepting
             // more text. 0 asks for the implementation's own maximum instead of a fixed number.
@@ -288,6 +297,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int qr_grid = GetDlgItemInt(hwnd, IDC_QRGRID_EDIT, nullptr, FALSE);
                 if (qr_grid <= 0) qr_grid = 1;
                 bool request_mjpeg = IsDlgButtonChecked(hwnd, IDC_MJPEG_CHECK) == BST_CHECKED;
+                bool disable_autofocus = IsDlgButtonChecked(hwnd, IDC_FOCUS_CHECK) == BST_CHECKED;
 
                 SetWindowTextW(GetDlgItem(hwnd, IDC_LOG_EDIT), L"");
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), is_send ? L"Invio in corso..." : L"Ricezione in corso...");
@@ -298,7 +308,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 app->running.store(true);
                 if (app->worker.joinable()) app->worker.join(); // previous run already finished
                 app->worker = std::thread(RunTransfer, app, is_send, path_w, camera_index, fps, camera_width,
-                                           camera_height, qr_grid, request_mjpeg);
+                                           camera_height, qr_grid, request_mjpeg, disable_autofocus);
             } else if (id == IDC_STOP_BTN) {
                 app->cancel.store(true);
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), L"Arresto in corso...");
@@ -361,7 +371,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     AppState app;
 
     HWND hwnd = CreateWindowExW(0, kClassName, L"QRTP — Trasferimento file via QR", WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
-                                 CW_USEDEFAULT, CW_USEDEFAULT, 520, 458, nullptr, nullptr, hInstance, &app);
+                                 CW_USEDEFAULT, CW_USEDEFAULT, 520, 478, nullptr, nullptr, hInstance, &app);
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 

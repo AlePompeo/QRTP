@@ -159,6 +159,17 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
         cap(capture_)->set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
     }
 
+    // Opt-in, default off — see OpticalLinkConfig::disable_autofocus for the reasoning (a real log
+    // showed capture *and* decode latency both drop sharply and together right at a fps transition,
+    // which doesn't fit a pure camera-hardware-bound explanation once same-machine CPU contention
+    // is ruled out; continuous autofocus hunting under fast-changing on-screen content is the next
+    // suspect). Requested after BUFFERSIZE/FOURCC, before resolution, for the same reason those are
+    // ordered this way: some backends renegotiate more freely before a resolution request locks
+    // things in.
+    if (cfg_.disable_autofocus) {
+        cap(capture_)->set(cv::CAP_PROP_AUTOFOCUS, 0);
+    }
+
     // Three modes, by default requesting the camera's highest available mode automatically
     // (kAutoMaxResolution): OpenCV's base VideoCapture interface has no portable "list supported
     // resolutions" call (that's backend-specific, e.g. DirectShow's IAMStreamConfig, real COM
@@ -198,7 +209,8 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
                   std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_WIDTH))) + "x" +
                   std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_HEIGHT))) + requested_desc +
                   " fourcc=" + std::string(fourcc_chars) +
-                  (cfg_.request_mjpeg ? " (mjpeg requested)" : " (mjpeg not requested)"));
+                  (cfg_.request_mjpeg ? " (mjpeg requested)" : " (mjpeg not requested)") +
+                  (cfg_.disable_autofocus ? " (autofocus disabled)" : " (autofocus left on)"));
     }
 
     capture_thread_ = new CaptureThread(cap(capture_));
