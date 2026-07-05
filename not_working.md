@@ -6,6 +6,27 @@ session.
 
 ## Resolved
 
+### GUI-only defaults changed: WeChatQRCode on, 640x480, 30fps (2026-07-05)
+
+**Ask**: set the GUI's pre-filled defaults to WeChatQRCode enabled, 640x480 resolution, and 30fps —
+explicitly GUI-only, not a change to the library/CLI defaults.
+
+**Fix**: in `gui_win32.cpp`'s `WM_CREATE` handler only — `IDC_FPS_EDIT` pre-fills "30" (was "3"),
+`IDC_RES_EDIT` pre-fills "640x480" (was "1280x720"), and `IDC_WECHAT_CHECK` is now
+`CheckDlgButton(...BST_CHECKED)` by default (was unchecked). `OpticalLinkConfig::fps` (3.0),
+`camera_width`/`camera_height` (1280/720), and `use_wechat_qrcode` (false) — the values `qrtp send`/
+`qrtp receive` and the AdaptiveController actually start from — are untouched; these are only the
+text/checkbox state a GUI user sees before pressing "Avvia", same as any of these fields already
+were. The `if (fps <= 0.0) fps = 3.0;` fallback (for an emptied/invalid field) is also left as-is,
+since it's a safety floor, not itself a "default" in the sense asked for here.
+
+**Verified**: `make test`, a full loopback demo transfer (byte-for-byte identical + hash match),
+native build, and the Windows cross-compile (all three .exe targets) build/pass cleanly. NOT
+verified on real camera hardware — this combination (WeChatQRCode + lower resolution + higher fps
+than this project's own handshake-safe starting point) is untested; see the AdaptiveConfig::
+fps_initial history for why starting fast has caused real regressions before. That risk applies
+here too since this bypasses it by construction (GUI now opens with 30 pre-filled, not 3).
+
 ### Integrated WeChatQRCode as an opt-in decoder, chosen over zxing-cpp (2026-07-05)
 
 **Context**: after comparing OpenCV's classic `cv::QRCodeDetector` against two alternatives

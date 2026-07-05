@@ -206,15 +206,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             mk(L"STATIC", L"Indice camera:", 0, 10, 80, 100, 20, 0);
             mk(L"EDIT", L"0", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 110, 77, 50, 22, IDC_CAMERA_EDIT);
             mk(L"STATIC", L"FPS:", 0, 175, 80, 40, 20, 0);
-            mk(L"EDIT", L"3", WS_BORDER | ES_AUTOHSCROLL, 220, 77, 50, 22, IDC_FPS_EDIT);
+            // GUI-only default of 30 (2026-07-05) — deliberately higher than the library/CLI
+            // default (OpticalLinkConfig::fps = 3.0, still used by `qrtp send`/`qrtp receive` and
+            // as the AdaptiveController's own fps_initial): requested specifically for GUI use,
+            // paired with the lower 640x480 resolution default and WeChatQRCode below. Still just
+            // the pre-filled text of an editable field, not a code-level change to the safe
+            // handshake-survives-camera-settling starting point documented in AdaptiveConfig.
+            mk(L"EDIT", L"30", WS_BORDER | ES_AUTOHSCROLL, 220, 77, 50, 22, IDC_FPS_EDIT);
             mk(L"STATIC", L"Ris. (LxA):", 0, 285, 80, 85, 20, 0);
-            // Pre-filled with "1280x720" (see OpticalLinkConfig::camera_width/camera_height): real
-            // hardware testing across two machines found this the best-performing fixed resolution,
-            // ahead of "max" (auto-detecting the camera's own highest mode) — which an earlier test
-            // showed negotiating cleanly to 1280x720 on one machine but to a worse mode on another.
-            // Still fully editable per machine: type "max" to opt back into auto-detection, "0x0" to
-            // skip any request and leave the camera fully alone, or any other specific WxH.
-            mk(L"EDIT", L"1280x720", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
+            // GUI-only default of 640x480 (2026-07-05), lower than the library/CLI default
+            // (OpticalLinkConfig::camera_width/height = 1280x720) — requested specifically for GUI
+            // use, paired with the higher 30fps default above and WeChatQRCode below. Still fully
+            // editable per machine: type "max" to opt back into auto-detection, "0x0" to skip any
+            // request and leave the camera fully alone, or any other specific WxH.
+            mk(L"EDIT", L"640x480", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
 
             mk(L"STATIC", L"QR per frame:", 0, 10, 106, 100, 20, 0);
             // Classic default "1" — exactly the original single-QR-at-a-time behavior. >1 is the
@@ -238,11 +243,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // fast-changing on-screen content is a candidate, not a confirmed fix.
             mk(L"BUTTON", L"Blocca autofocus", BS_AUTOCHECKBOX, 10, 127, 160, 20, IDC_FOCUS_CHECK);
 
-            // Unchecked by default (see OpticalLinkConfig::use_wechat_qrcode): untested on real
-            // hardware. Needs detect.prototxt/detect.caffemodel/sr.prototxt/sr.caffemodel in a
-            // "models/wechat_qrcode" folder next to this executable — see models/wechat_qrcode/
-            // LICENSE. Must match on both sides of the transfer.
+            // Checked by default in the GUI as of 2026-07-05 (the library/CLI default in
+            // OpticalLinkConfig::use_wechat_qrcode stays false — this is a GUI-only preference,
+            // paired with the 640x480/30fps GUI defaults above), even though it's still untested on
+            // real camera hardware. Needs detect.prototxt/detect.caffemodel/sr.prototxt/
+            // sr.caffemodel in a "models/wechat_qrcode" folder next to this executable — see
+            // models/wechat_qrcode/LICENSE. Must match on both sides of the transfer.
             mk(L"BUTTON", L"Usa WeChatQRCode (CNN)", BS_AUTOCHECKBOX, 200, 127, 200, 20, IDC_WECHAT_CHECK);
+            CheckDlgButton(hwnd, IDC_WECHAT_CHECK, BST_CHECKED);
 
             mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 163, 100, 28, IDC_START_BTN);
             HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 163, 100, 28, IDC_STOP_BTN);
