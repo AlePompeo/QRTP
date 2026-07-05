@@ -6,6 +6,49 @@ session.
 
 ## Resolved
 
+### Follow-up hardware/CPU sweep specifically targeting capture time (2026-07-05)
+
+User asked, after the build-optimization + capture/decode pipelining + resolution changes, for
+one more pass specifically at reducing capture time and any other CPU/GPU/thread/core lever left.
+Went through the remaining candidates systematically:
+
+**Implemented (all narrow, uniformly-safe — not hardware-negotiation-dependent like resolution
+was, so not made opt-in):**
+- `cap->set(CAP_PROP_BUFFERSIZE, 1)` — asks the backend to keep at most one frame queued
+  internally, so `cap->read()` returns the freshest captured frame instead of dequeuing one the
+  driver already had buffered. This is one of the most common, well-established fixes for "camera
+  feed feels laggy/behind" in OpenCV apps specifically, and unlike the resolution request, it
+  doesn't change the capture format/pixel count (where different camera hardware diverged
+  sharply) — just an internal queue depth a backend either honors or silently ignores.
+- Modest thread-priority bump (`THREAD_PRIORITY_ABOVE_NORMAL`) on the background `CaptureThread`
+  specifically, and a modest whole-process priority bump (`ABOVE_NORMAL_PRIORITY_CLASS`) at
+  `OpticalLink` construction — reduces how often the OS scheduler lets unrelated background
+  activity delay a time-sensitive capture/render/decode round trip. Deliberately `ABOVE_NORMAL`,
+  not `HIGH`/`REALTIME`, which can genuinely starve the rest of the system; this is the
+  commonly-recommended safe middle ground for latency-sensitive desktop/media apps.
+
+**Investigated, not pursued (with reasons, not just skipped):**
+- **GPU/OpenCL for capture itself**: doesn't apply — camera capture is bound by USB transfer and
+  driver-side format conversion (e.g. MJPEG decode), not parallel compute a GPU accelerates. There
+  is no "GPU-accelerated frame grab" for a UVC webcam.
+- **More capture threads**: wouldn't help — the bottleneck is the camera/driver/USB pipeline
+  itself (fundamentally one `read()` call at a time from the OS's perspective), not CPU-side work
+  our own code could parallelize further. `cv::cvtColor` (the only other per-frame work in the
+  capture thread) is already cheap enough that splitting it off wouldn't move the needle.
+- **Forcing a specific pixel format (FOURCC, e.g. preferring raw YUY2 over MJPEG)**: same category
+  of risk as the resolution request — some cameras are *faster* with MJPEG at higher resolutions
+  (raw YUY2 can exceed USB 2.0 bandwidth at 720p+, forcing the camera to only offer MJPEG there
+  anyway), others may behave oppositely. Not implemented blind; if capture time is still the
+  dominant cost after this pass, this is the next thing to expose as an opt-in experiment (same
+  pattern as `--width`/`--height`), not a forced default.
+- **`cv::wechat_qrcode`** remains the largest not-yet-pursued lever for the *decode* side
+  specifically (see the previous optimization-pass entry) — unrelated to capture time, noted here
+  again since it's still the natural next step if this pass isn't enough.
+
+**Verified**: `make test`, native build, and the OpenCV-enabled Windows cross-compile all build
+and pass cleanly. **Not verified against real hardware** — same caveat as every change in this
+optimization arc; the actual effect on `avg_capture_ms` is the thing to check in the next log.
+
 ### Made 1280x720 the automatic default again, with manual override still available (2026-07-05)
 
 After the previous entry explained *why* the camera defaults to 640x480 without a request, the

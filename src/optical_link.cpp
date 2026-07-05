@@ -52,6 +52,12 @@ struct CaptureThread {
 
     void run() {
         using Clock = std::chrono::steady_clock;
+#ifdef _WIN32
+        // This thread's only job is grabbing camera frames as promptly as possible; a modest
+        // priority bump (not REALTIME/HIGH, which can starve the rest of the system) reduces how
+        // often the OS scheduler lets something less time-sensitive delay a capture in progress.
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+#endif
         while (!stop.load()) {
             const auto t0 = Clock::now();
             cv::Mat frame;
@@ -91,6 +97,13 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
     screen_w_ = GetSystemMetrics(SM_CXSCREEN);
     screen_h_ = GetSystemMetrics(SM_CYSCREEN);
     if (screen_w_ <= 0 || screen_h_ <= 0) { screen_w_ = 1000; screen_h_ = 1000; }
+
+    // A modest, whole-process priority bump — this process's entire job while a transfer is
+    // running is latency-sensitive (render/capture/decode round trips), so reduce how much the OS
+    // scheduler lets unrelated background processes delay it. ABOVE_NORMAL, not HIGH/REALTIME,
+    // which can genuinely starve the rest of the system — this is the safe, commonly-recommended
+    // middle ground for latency-sensitive desktop apps (many audio/video tools use exactly this).
+    SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 #endif
 
     // Two separate windows — see optical_link.hpp for why sharing one would break the protocol.
@@ -111,6 +124,14 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
     if (!cap(capture_)->isOpened()) {
         throw std::runtime_error("OpticalLink: cannot open camera index " + std::to_string(cfg_.camera_index));
     }
+
+    // Asks the backend to keep at most 1 frame queued internally, so cap->read() returns the
+    // freshest available frame instead of dequeuing one the driver already had buffered — a
+    // narrower, more uniformly-safe request than the resolution one below: it doesn't change the
+    // capture format/pixel count (where different camera hardware diverged sharply), just how many
+    // already-captured frames sit in a queue before this process sees them. A `set()` a backend
+    // doesn't honor is simply ignored, same as any other capability request here.
+    cap(capture_)->set(cv::CAP_PROP_BUFFERSIZE, 1);
 
     // Requests a resolution whenever both dimensions are positive — true by default (1280x720,
     // see OpticalLinkConfig), since OpenCV's DirectShow backend otherwise tends to settle for a
