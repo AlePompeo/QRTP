@@ -6,6 +6,54 @@ session.
 
 ## Resolved
 
+### Revisited chunk_size_max with the considerations it deserved this time — raised to 1500, plus a real latent bug fixed along the way (2026-07-05)
+
+User asked whether more bytes/frame could be embedded to speed up large-file transfers — the same
+lever (`chunk_size_max`) that already caused two real regressions this session (2048, then a
+receiver-side fps scheme). Asked explicitly for "the right considerations" this time, so worked
+through what's actually changed since the original failure, instead of re-guessing:
+
+**Why the original 2048 attempt likely failed for a different reason than assumed at the time**:
+the render loop had a real O(width²) bug back then (one `cv::Rect`+`Mat::setTo` per module, ~31k
+calls for a large QR) — fixed in v19, verified 2.6-5x faster for larger QR codes specifically.
+The *render* cost was very plausibly the dominant cause of "large QR = lag" reported right after
+2048 shipped, not chunk size itself. Real `avg_decode_ms` data gathered since (QR versions 3-15)
+also shows no strong scaling with QR size in that range — `cv::QRCodeDetector`'s cost looks tied
+more to the captured frame's own size than the QR's module count. Both original reasons to avoid
+a larger chunk are weaker than they looked when 2048 was reverted.
+
+**Why not push all the way back to 2048 anyway**: no real data covers QR versions much above
+~15-20 — beyond that, physical module pixels shrink enough at a fixed on-screen size to plausibly
+hurt decode *reliability* even if raw decode time doesn't scale much (the v9 finding, same
+mechanism as raising EC level). Untested territory, not disproven safe. Raised to 1500 instead —
+the value with an actual multi-version real-hardware track record (v1-18), predating any of the
+render/decode bugs found since.
+
+**A real latent bug found and fixed along the way, independent of the chosen ceiling**:
+`AdaptiveController::upshift()` grew chunk size toward `chunk_size_max` without checking whether
+the *current* EC level could actually encode a payload that large. `downshift()` correctly shrinks
+chunk to its floor before EC level is allowed to get worse (so chunk is always small by the time EC
+reaches H) — but `upshift()` had no matching guarantee in the other direction: chunk size grows
+first and EC level only improves once chunk is *already* at its ceiling, so a chunk size climbing
+back up while EC level is still elevated from an earlier downshift was entirely possible. If
+`chunk_size_max` (or even the previous 1024) ever exceeded what the *current* EC level's version-40
+capacity allows (2953/2331/1663/1273 bytes for L/M/Q/H respectively, ISO/IEC 18004, after Base64
+expansion and frame overhead), `qr_encode_bytes()` would throw — an unhandled exception, hard-
+failing the transfer, regardless of what `chunk_size_max` was configured to.
+
+**Fix**: added `max_chunk_for_ec_level()` (`adaptive.cpp`) and made `upshift()` cap chunk growth by
+`min(chunk_size_max, max_chunk_for_ec_level(current_ec_level))` — chunk size can now never outgrow
+what's actually encodable, and EC level only gets to improve once chunk has hit *that* ceiling
+(which may be lower than `chunk_size_max` if EC is still elevated), naturally unlocking more room
+on the next upshift. This makes any `chunk_size_max` value safe to try, not just this particular
+one.
+
+**Verified**: `make test` (including `test_adaptive_aimd`), a full randomized loopback transfer
+(byte-for-byte + hash match, 5% loss/3% corruption), native build, and the OpenCV-enabled Windows
+cross-compile all pass/build cleanly. **Not verified on real hardware** for the throughput
+question itself (does 1500 actually transfer large files faster without reintroducing lag) — same
+outstanding confirmation as everything else in this arc.
+
 ### Follow-up hardware/CPU sweep specifically targeting capture time (2026-07-05)
 
 User asked, after the build-optimization + capture/decode pipelining + resolution changes, for

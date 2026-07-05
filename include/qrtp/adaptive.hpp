@@ -16,21 +16,25 @@ struct AdaptiveConfig {
 
     size_t chunk_size_initial = 256; // bytes of file payload per DATA frame (QR-density proxy)
     size_t chunk_size_min = 32;
-    // Briefly raised to 2048 on the theory that a version-40/EC=L QR has the raw byte capacity for
-    // it (base64_len(chunk + kFixedOverhead) <= 2953, ISO/IEC 18004) — but real-hardware testing
-    // showed throughput getting much worse, not better, and specifically pointed at large QR codes
-    // being the cause (smaller QR codes performed best). The capacity math only checked whether the
-    // data *fits*; it ignored that a bigger, denser code costs real wall-clock time to render and
-    // (especially) to decode on actual camera/CPU hardware — the same category of mistake as v9's
-    // "raising EC level shrinks module pixels" finding. Reverted to 1500, then knocked down further
-    // to 1024: the render-side cost is now fixed directly (see OpticalLink::send — was one
-    // cv::Rect+setTo per module, now a single cv::resize), but the *decode* side
-    // (cv::QRCodeDetector, opaque library internals) still gets more expensive and less reliable as
-    // QR version climbs, and that cost is outside this codebase's control. Lowering the reachable
-    // ceiling is the direct lever available for it. Still needs real-hardware confirmation that this
-    // (combined with the render fix) actually resolves the reported lag — not a guess dressed up as
-    // certainty, just the next data point to gather.
-    size_t chunk_size_max = 1024;
+    // History: 1500 (v1-18) -> 2048, real regression, reverted -> 1024. The 2048 regression's
+    // real cause turned out to be the render loop (one cv::Rect+setTo per module, ~31k calls for a
+    // large QR) rather than chunk size itself — fixed in v19 (single cv::resize, verified
+    // byte-identical output, 2.6-5x faster, bigger win for bigger QR codes). Real decode-timing
+    // data gathered since (avg_decode_ms across QR versions 3-15, logged in try_receive()) shows no
+    // strong scaling with QR size in that range either — cv::QRCodeDetector's cost looks more tied
+    // to the captured frame's own size than to the QR's module count. Both original reasons to
+    // avoid larger chunks are weaker than they looked at the time.
+    // Raised back to 1500 (not all the way back to 2048): still no real evidence covers QR
+    // versions much above ~15-20, where physical module pixels shrink enough at a fixed on-screen
+    // size to plausibly hurt decode *reliability* even if raw decode time doesn't scale much (the
+    // v9 finding, same mechanism as raising EC level) — untested territory, not disproven. 1500 has
+    // an actual multi-version track record on real hardware (v1-18) predating any of these bugs.
+    // Also now safe regardless of this value: upshift() caps chunk growth by what the *current* EC
+    // level can actually encode (see max_chunk_for_ec_level in adaptive.cpp) — previously nothing
+    // stopped chunk size from growing back up while EC level was still elevated from an earlier
+    // downshift, which could ask qr_encode_bytes() for a payload too large for that EC level and
+    // throw, hard-failing the transfer regardless of what this constant was set to.
+    size_t chunk_size_max = 1500;
 
     ECLevel ec_level_initial = ECLevel::M;
 

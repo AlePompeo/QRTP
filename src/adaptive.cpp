@@ -3,7 +3,29 @@
 #include <algorithm>
 #include <cmath>
 
+#include "qrtp/framing.hpp"
+
 namespace qrtp {
+namespace {
+
+// Version-40 (the largest QR symbol) byte-mode capacity per EC level, ISO/IEC 18004 — the hard
+// ceiling a chunk size must respect once Base64 expansion (base64_len(n) = 4*ceil(n/3)) and the
+// fixed frame header/CRC overhead are accounted for. chunk_size_max alone doesn't guarantee this:
+// upshift() grows chunk size first and only improves EC level once chunk is already at *its*
+// ceiling, but EC level can still be sitting at a worse setting left over from an earlier
+// downshift while chunk size climbs back up — nothing previously stopped that combination from
+// asking qr_encode_bytes() to encode a payload that doesn't fit any version at the current EC
+// level, which throws (see qr_encoder.cpp) and would hard-fail the transfer with an unhandled
+// exception, regardless of what chunk_size_max was configured to.
+constexpr size_t kVersion40Capacity[4] = {2953, 2331, 1663, 1273}; // indexed by ECLevel: L, M, Q, H
+
+size_t max_chunk_for_ec_level(ECLevel level) {
+    const size_t capacity = kVersion40Capacity[static_cast<uint8_t>(level)];
+    const size_t max_frame_bytes = (capacity / 4) * 3; // largest n with 4*ceil(n/3) <= capacity
+    return max_frame_bytes > kFixedOverhead ? max_frame_bytes - kFixedOverhead : 0;
+}
+
+} // namespace
 
 const char* ec_level_name(ECLevel level) {
     switch (level) {
@@ -60,8 +82,14 @@ void AdaptiveController::record_loss_event(double severity) {
 void AdaptiveController::upshift() {
     if (window_size_ < cfg_.window_max) ++window_size_;
 
-    if (chunk_size_ < cfg_.chunk_size_max) {
-        chunk_size_ = std::min(cfg_.chunk_size_max, chunk_size_ + chunk_size_ / 10 + 1);
+    // Never grow past what the *current* EC level can actually encode, even if chunk_size_max
+    // allows more — see max_chunk_for_ec_level's comment for why this matters. This is the
+    // effective ceiling chunk size grows toward; only once chunk size has reached it (whichever of
+    // chunk_size_max or the EC-level limit is smaller) does EC level get to improve, unlocking a
+    // higher ceiling for the next upshift.
+    const size_t chunk_ceiling = std::min(cfg_.chunk_size_max, max_chunk_for_ec_level(ec_level_));
+    if (chunk_size_ < chunk_ceiling) {
+        chunk_size_ = std::min(chunk_ceiling, chunk_size_ + chunk_size_ / 10 + 1);
     } else if (ec_level_ != ECLevel::L) {
         ec_level_ = static_cast<ECLevel>(static_cast<uint8_t>(ec_level_) - 1);
     }
