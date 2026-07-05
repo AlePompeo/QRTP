@@ -22,9 +22,15 @@ struct AdaptiveConfig {
     // being the cause (smaller QR codes performed best). The capacity math only checked whether the
     // data *fits*; it ignored that a bigger, denser code costs real wall-clock time to render and
     // (especially) to decode on actual camera/CPU hardware — the same category of mistake as v9's
-    // "raising EC level shrinks module pixels" finding. Reverted to the last value with confirmed
-    // real-world behavior behind it.
-    size_t chunk_size_max = 1500;
+    // "raising EC level shrinks module pixels" finding. Reverted to 1500, then knocked down further
+    // to 1024: the render-side cost is now fixed directly (see OpticalLink::send — was one
+    // cv::Rect+setTo per module, now a single cv::resize), but the *decode* side
+    // (cv::QRCodeDetector, opaque library internals) still gets more expensive and less reliable as
+    // QR version climbs, and that cost is outside this codebase's control. Lowering the reachable
+    // ceiling is the direct lever available for it. Still needs real-hardware confirmation that this
+    // (combined with the render fix) actually resolves the reported lag — not a guess dressed up as
+    // certainty, just the next data point to gather.
+    size_t chunk_size_max = 1024;
 
     ECLevel ec_level_initial = ECLevel::M;
 

@@ -6,6 +6,49 @@ session.
 
 ## Resolved
 
+### Large QR codes visibly lagging the whole app — a real O(width²) rendering cost, fixed directly instead of just tuned around (2026-07-05)
+
+**Symptom**: user report — large QR codes specifically make the whole app laggy; smaller QR codes
+run noticeably smoother. Previously addressed only indirectly, by lowering `chunk_size_max` (which
+lowers how large a QR *can* get, but does nothing about the actual cost of rendering/decoding one
+when it does get large).
+
+**Root cause (rendering side, now fixed)**: `OpticalLink::send()` drew the QR by looping over every
+module and, for each dark one, constructing a `cv::Rect` and calling `Mat::setTo()` on that
+sub-region — for a version-40 QR (177×177 modules) that's up to ~31,000 individual OpenCV calls
+*per displayed frame*, cost growing with the square of the QR version. This is exactly the kind of
+cost that would show up as "bigger QR = more lag" independent of anything about window size, chunk
+size, or the adaptive controller's tuning.
+
+**Fix**: build the QR at 1 pixel/module first with a plain pointer-write loop (no OpenCV call per
+module), then a single `cv::resize(..., INTER_NEAREST)` scales it up to the on-screen size.
+Verified via a standalone script (numpy/cv2) that this produces **byte-identical output** to the
+old per-module fill across QR widths 21–177 and scales 4–13 (nearest-neighbor upscaling by an exact
+integer factor always maps each destination pixel back to exactly one source module pixel — same
+sharp block edges, not an approximation). Benchmarked 1.2×–5.1× faster depending on QR size (bigger
+win for bigger QR codes, as expected since the fixed per-call overhead that scaled with module count
+is what got removed).
+
+**Also addressed (decode/preview side)**: `try_receive()` fed the camera's full 3-channel color
+frame directly to both the live preview (`cv::imshow`) and `cv::QRCodeDetector::detectAndDecode()`
+on every polled frame. QR content is pure black/white, so nothing downstream needs color channels —
+converted to grayscale once right after capture and reused for both, on a smaller (1-channel)
+image, in a loop that polls continuously. This doesn't eliminate whatever color conversion the
+camera backend itself does internally to produce a BGR frame in the first place (backend/driver
+territory, out of reach without hardware to test against), but does guarantee we're not also
+letting the detector redundantly re-derive grayscale from a full color frame on top of that.
+
+**Additionally**: `chunk_size_max` lowered from 1500 to 1024. The rendering fix addresses the CPU
+cost of *drawing* a large QR; it does nothing about the cost or reliability of *decoding* one
+(`cv::QRCodeDetector`'s internals are an opaque library dependency) — that side still gets more
+expensive and less reliable as QR version climbs. Lowering the reachable ceiling is the direct lever
+available for that half of the problem.
+
+**Not yet confirmed by the user** — the rendering equivalence and speedup are verified in isolation
+(script + benchmark above, not this app's actual camera/display loop), and `make test` plus a full
+loopback demo transfer still pass, but real improvement on real hardware is the outstanding
+confirmation, same as every constant/behavior change in this log.
+
 ### The "fix" for the previous regression made throughput twice as bad — mirroring the sender's fps onto the receiver defeats a manually-configured fast receiver (2026-07-05)
 
 **Symptom**: real user report on the v17 build (rate-mirroring fix) — throughput got *worse*, not

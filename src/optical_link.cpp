@@ -84,15 +84,23 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     const int scale = std::max(4, target / modules_per_side);
     const int side = modules_per_side * scale;
 
-    cv::Mat img(side, side, CV_8UC1, cv::Scalar(255));
+    // Build at 1 px/module first (a plain pointer-write loop, no OpenCV call per module) and let a
+    // single cv::resize scale it up to the on-screen size — was one cv::Rect + Mat::setTo call per
+    // dark module (up to ~31k of them for a version-40 QR), which is real, avoidable per-frame CPU
+    // cost that grows with the square of the QR version — exactly the kind of thing that would show
+    // up as "bigger QR codes make everything laggier" independent of anything about the adaptive
+    // controller's tuning. INTER_NEAREST at an exact integer scale factor maps every destination
+    // pixel back to one source module pixel, so this produces byte-identical output to the old
+    // per-module fill — same sharp, blocky module edges, just built much cheaper.
+    cv::Mat small(modules_per_side, modules_per_side, CV_8UC1, cv::Scalar(255));
     for (int y = 0; y < qr.width; ++y) {
+        uint8_t* row = small.ptr<uint8_t>(y + quiet) + quiet;
         for (int x = 0; x < qr.width; ++x) {
-            if (qr.modules[static_cast<size_t>(y) * qr.width + x]) {
-                cv::Rect block((x + quiet) * scale, (y + quiet) * scale, scale, scale);
-                img(block).setTo(cv::Scalar(0));
-            }
+            row[x] = qr.modules[static_cast<size_t>(y) * qr.width + x] ? 0 : 255;
         }
     }
+    cv::Mat img;
+    cv::resize(small, img, cv::Size(side, side), 0, 0, cv::INTER_NEAREST);
 
     if (side != last_window_side_) {
         // Large and centered, but still a normal decorated window (WINDOW_NORMAL, not
@@ -120,11 +128,22 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
     while (std::chrono::steady_clock::now() < deadline) {
         cv::Mat frame;
         if (cap(capture_)->read(frame) && !frame.empty()) {
+            // QR content is pure black/white — nothing downstream needs the camera's color
+            // channels. Converting once here (instead of leaving it to QRCodeDetector's own
+            // internal conversion on a full 3-channel frame every single call) and reusing the
+            // same grayscale Mat for the local preview too means only one conversion per captured
+            // frame, on a smaller image, in this hot polling loop.
+            cv::Mat gray;
+            if (frame.channels() > 1) {
+                cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+            } else {
+                gray = frame;
+            }
             // Live camera preview in its own window — helps the user aim the camera, and never
             // touches out_window_name_, so it can't stomp on whatever we're currently displaying
             // to the other side.
-            cv::imshow(camera_window_name_, frame);
-            const std::string decoded_text = det(detector_)->detectAndDecode(frame);
+            cv::imshow(camera_window_name_, gray);
+            const std::string decoded_text = det(detector_)->detectAndDecode(gray);
             if (!decoded_text.empty()) {
                 const uint32_t h = crc32(reinterpret_cast<const uint8_t*>(decoded_text.data()), decoded_text.size());
                 const std::vector<uint8_t> hash_bytes = {uint8_t(h), uint8_t(h >> 8), uint8_t(h >> 16),
