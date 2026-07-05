@@ -6,6 +6,25 @@ session.
 
 ## Resolved
 
+### Made AdaptiveConfig::chunk_size_max runtime-overridable (2026-07-05)
+
+**Ask**: expose the QR payload density ceiling (`AdaptiveConfig::chunk_size_max`, default 1024
+bytes/DATA-frame) as a runtime opt-in, without changing the current default.
+
+**Fix**: added `--chunk-max N` to both `qrtp send`/`qrtp receive` (parsed into a local
+`std::optional<size_t>` during argument parsing, applied to `cfg.adaptive.chunk_size_max` right
+after `ProtocolConfig cfg` is constructed — mirrors how every other optical CLI flag is threaded
+through) and a new "Chunk max:" field in the Win32 GUI (pre-filled "1024", the current default;
+falls back to 1024 if emptied/zero, same pattern as the QR-per-frame field). GUI window grown by
+23px to fit the new row. No change to the default itself — `AdaptiveConfig::chunk_size_max` stays
+1024 in `adaptive.hpp`. Deliberately not added to `qrtp demo` (loopback, no camera constraints) —
+this knob's whole rationale (QR version vs. module-size/decode-reliability trade) only applies to
+the real optical link, unlike, say, `--qr-grid` which is exercised meaningfully either way.
+
+**Verified**: `make test`, a full loopback demo transfer (byte-for-byte identical + hash match),
+native build, and the Windows cross-compile (all three .exe targets, including the resized GUI
+layout) build/pass cleanly.
+
 ### WeChatQRCode + 640x480 promoted from GUI-only to library/CLI defaults (2026-07-05)
 
 **Ask**: after setting WeChatQRCode-on/640x480/30fps as GUI-only defaults (previous entry), the

@@ -32,6 +32,7 @@ void print_usage() {
 #ifdef QRTP_WITH_OPENCV
         "  qrtp send <file> [--camera N] [--fps F] [--width W --height H] [--qr-grid N] [--no-mjpeg]\n"
         "                   [--lock-focus] [--no-wechat-qrcode] [--wechat-model-dir DIR]\n"
+        "                   [--chunk-max N]\n"
         "      Send over the real optical link: renders QR frames to a window and reads\n"
         "      ACKs/SACKs back from camera index N (the peer's screen must face this camera).\n"
         "      --qr-grid N (default 1, classic/original behavior) batches N frames into a single\n"
@@ -66,12 +67,20 @@ void print_usage() {
         "      terms. Expected to cost somewhat more CPU per attempt than the classic detector, in\n"
         "      exchange for (unverified end-to-end on real hardware) better detection of small/\n"
         "      blurry/angled codes. Pass --no-wechat-qrcode to use the classic detector instead; must\n"
-        "      be set the same on both sides either way.\n\n"
+        "      be set the same on both sides either way.\n"
+        "      --chunk-max N overrides AdaptiveConfig::chunk_size_max (default 1024 bytes of file\n"
+        "      payload per DATA frame — the AIMD's ceiling on how dense a QR code's payload is\n"
+        "      allowed to grow to). Higher values pack more bytes per QR (fewer QR codes needed for\n"
+        "      the same file) at the cost of a higher QR version — larger, more finely-detailed\n"
+        "      codes that are more sensitive to camera resolution/focus/distance; lower values do\n"
+        "      the opposite. Already safe regardless of value: upshift() also caps growth by what\n"
+        "      the current EC level can actually encode, so this can't ask for a payload too large\n"
+        "      to fit any QR version. Must be set the same on both sides of the transfer.\n\n"
         "  qrtp receive --out <dir> [--camera N] [--fps F] [--width W --height H] [--qr-grid N]\n"
         "                          [--no-mjpeg] [--lock-focus] [--no-wechat-qrcode]\n"
-        "                          [--wechat-model-dir DIR]\n"
+        "                          [--wechat-model-dir DIR] [--chunk-max N]\n"
         "      Receive over the real optical link. Same --width/--height, --qr-grid, --no-mjpeg,\n"
-        "      --lock-focus, --no-wechat-qrcode and --wechat-model-dir notes as above.\n");
+        "      --lock-focus, --no-wechat-qrcode, --wechat-model-dir and --chunk-max notes as above.\n");
 #else
         "  qrtp send / qrtp receive\n"
         "      Not available in this build — rebuild with `make WITH_OPENCV=1` after\n"
@@ -157,6 +166,7 @@ int cmd_send_optical(int argc, char** argv) {
     }
     const std::string path = argv[2];
     qrtp::OpticalLinkConfig ocfg;
+    std::optional<size_t> chunk_max_override;
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--camera" && i + 1 < argc) ocfg.camera_index = std::stoi(argv[++i]);
@@ -168,12 +178,14 @@ int cmd_send_optical(int argc, char** argv) {
         else if (a == "--lock-focus") ocfg.disable_autofocus = true;
         else if (a == "--no-wechat-qrcode") ocfg.use_wechat_qrcode = false;
         else if (a == "--wechat-model-dir" && i + 1 < argc) ocfg.wechat_qrcode_model_dir = argv[++i];
+        else if (a == "--chunk-max" && i + 1 < argc) chunk_max_override = static_cast<size_t>(std::stoul(argv[++i]));
     }
     try {
         ocfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
         qrtp::OpticalLink link(ocfg);
         qrtp::ProtocolConfig cfg;
         cfg.log = ocfg.log;
+        if (chunk_max_override) cfg.adaptive.chunk_size_max = *chunk_max_override;
         qrtp::Sender sender(link, cfg);
         const auto result = sender.send_file(path);
         std::printf("%s: %s\n", result.success ? "OK" : "FAILED", result.message.c_str());
@@ -187,6 +199,7 @@ int cmd_send_optical(int argc, char** argv) {
 int cmd_receive_optical(int argc, char** argv) {
     qrtp::OpticalLinkConfig ocfg;
     std::string out_dir = ".";
+    std::optional<size_t> chunk_max_override;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--camera" && i + 1 < argc) ocfg.camera_index = std::stoi(argv[++i]);
@@ -198,6 +211,7 @@ int cmd_receive_optical(int argc, char** argv) {
         else if (a == "--lock-focus") ocfg.disable_autofocus = true;
         else if (a == "--no-wechat-qrcode") ocfg.use_wechat_qrcode = false;
         else if (a == "--wechat-model-dir" && i + 1 < argc) ocfg.wechat_qrcode_model_dir = argv[++i];
+        else if (a == "--chunk-max" && i + 1 < argc) chunk_max_override = static_cast<size_t>(std::stoul(argv[++i]));
         else if (a == "--out" && i + 1 < argc) out_dir = argv[++i];
     }
     try {
@@ -205,6 +219,7 @@ int cmd_receive_optical(int argc, char** argv) {
         qrtp::OpticalLink link(ocfg);
         qrtp::ProtocolConfig cfg;
         cfg.log = ocfg.log;
+        if (chunk_max_override) cfg.adaptive.chunk_size_max = *chunk_max_override;
         qrtp::Receiver receiver(link, cfg);
         qrtp::TransferMetadata meta;
         auto received = receiver.receive_file(meta, std::chrono::minutes(30));
