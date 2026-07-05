@@ -6,6 +6,53 @@ session.
 
 ## Resolved
 
+### Default fps raised to 24; added TCP-style fast retransmit for isolated frame losses (2026-07-05)
+
+User request: default fps to 24 at startup, and address the real bottleneck they'd observed —
+occasional missed QR frames during display refresh forcing a full retransmit-and-wait cycle that
+noticeably slows the whole transfer. They floated reconstructing a partially-read/fragmented QR as
+one option, and asked for other solutions to be investigated if that didn't make sense.
+
+**Why "reconstruct a fragmented QR" isn't practical here**: QR already has Reed-Solomon error
+correction built in — if `cv::QRCodeDetector::detectAndDecode()` returns a decoded string at all,
+it already recovered from whatever partial corruption was within the EC level's threshold. A
+completely failed decode (empty string) means either the finder patterns couldn't be located at
+all, or more than the EC threshold was corrupted — and OpenCV's public API doesn't expose a
+partial/soft-decision result to work with in that case (no "here's the 80% of modules I did
+manage to read"). Implementing that from scratch would mean writing a custom QR decoder with
+soft-decision combining across multiple failed camera frames — a research-scale undertaking, not
+a reasonable scope here.
+
+**What actually causes the described cost**: this channel already recovers from isolated losses
+correctly (selective-repeat ARQ, already tested extensively) — the "slowdown" is the *cost* of
+that recovery: a lost frame's own retransmit only fires once its individual RTO timer expires.
+At a fast fps (esp. 24, see below), a full RTO wait is many multiples of the actual round-trip
+time for what's usually just one isolated miss out of many successful frames.
+
+**Fix, matching a well-established technique (TCP's fast retransmit, RFC 5681) instead of a novel
+guess**: when a SACK arrives, if it shows the receiver already has something *ahead* of an offset
+still sitting unacked in the sender's own in-flight map, that's direct evidence of a gap. TCP
+requires several duplicate ACKs before acting on this because general IP networks can reorder
+packets across paths; this channel can't (one SACK per DATA frame, essentially in display order),
+so a single gap is already a reliable loss signal here. `Sender::send_file()` (`protocol.cpp`) now
+backdates that offset's `sent_at` timestamp so the *already-existing, already-tested* RTO-timeout
+retransmit path fires on the very next poll instead of waiting out a full RTO — reusing that logic
+entirely rather than duplicating a second retransmit code path.
+
+**Also**: `fps_initial`/`OpticalLinkConfig::fps` raised from 3.0 to 24.0 (`AdaptiveConfig`
+default, GUI field, CLI fallback) — the AIMD's existing severity-scaled downshift still protects
+this exactly as it protects any other starting value if 24 turns out too fast for a given
+camera/lighting setup.
+
+**Verified**: `make test` (including the full randomized loopback transfer), native build, and the
+OpenCV-enabled Windows cross-compile all pass/build cleanly. Additionally ran the loopback demo
+three more times at *higher* loss/corruption than the standard test (8%/5% vs. 5%/3%) to stress
+the new fast-retransmit path specifically — all three completed correctly, byte-for-byte. **Not
+verified on real hardware** for the actual throughput improvement (does fast retransmit measurably
+reduce the cost of isolated real-world misses) — this change is lower-risk than the COBS attempt
+since it's pure protocol logic fully exercisable via the synthetic-loss loopback tests, unlike
+anything touching the camera/OpenCV decode path directly.
+
 ### COBS broke the transfer starting from the very first SYN_ACK — reverted to Base64 (2026-07-05)
 
 **Symptom**: real user report right after the COBS switch shipped — the transfer no longer works

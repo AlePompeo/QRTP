@@ -13,9 +13,12 @@ namespace qrtp {
 
 struct OpticalLinkConfig {
     int camera_index = 0;
-    // A webcam needs meaningful dwell time on a static QR to focus, expose, and let the decode
-    // algorithm lock on; 10fps (100ms/frame) proved too fast for real hardware in testing.
-    double fps = 3.0;
+    // Was 3.0 (conservative starting point, letting the AIMD ramp it up); raised to 24 by request
+    // based on real hardware testing showing that range works well from the start. Matches
+    // AdaptiveConfig::fps_initial — this is only the value the link is constructed with before any
+    // Sender/Receiver ever calls set_fps(); the AIMD takes over from there and still protects
+    // against this being too fast for a given camera/lighting setup via its existing downshift.
+    double fps = 24.0;
     QrEcLevel ec_level = QrEcLevel::M;
     // Defaults to kAutoMaxResolution (both), which requests the camera's own highest available
     // mode automatically (see OpticalLink's constructor for how — OpenCV has no portable "list

@@ -36,12 +36,12 @@ struct AdaptiveConfig {
 
     ECLevel ec_level_initial = ECLevel::M;
 
-    // Start conservative (a webcam needs some dwell time on a QR to focus/expose/decode) and let
-    // the AIMD earn its way up from here — but real hardware testing showed 60fps working
-    // perfectly once the channel is good, far above the old fps_max=15 ceiling that was capping
-    // large-file throughput for no real reason. fps_initial stays low/safe for cameras that can't
-    // keep up; fps_max now reflects what's actually achievable, not a guess.
-    double fps_initial = 3.0;
+    // Was 3.0 (conservative default, letting the AIMD ramp up from there) — raised to 24 by
+    // request, based on real hardware testing showing that range works well as a starting point.
+    // The AIMD's existing downshift still protects this exactly as it protects any other
+    // fps_initial value: if 24 turns out to be too fast for a given camera/lighting setup, loss
+    // events pull it back down (severity-scaled, see downshift()) same as always.
+    double fps_initial = 24.0;
     double fps_min = 1.0;
     double fps_max = 60.0;
 
