@@ -68,8 +68,27 @@ struct AppState {
     std::atomic<bool> cancel{false};
 };
 
+// A plain Win32 EDIT control silently stops accepting new text past a default ~32K-character
+// limit unless EM_LIMITTEXT explicitly raises it (done once at creation, see WM_CREATE) — without
+// that, a long transfer's log looked like it had simply frozen partway through, when actually the
+// control was just refusing anything more. Also cap how much text we let it hold: an unbounded
+// multi-line EDIT gets visibly slower to update the longer it grows, which on a big/slow transfer
+// with many log lines can make the whole window feel like it's hanging even with the limit fixed.
+constexpr int kLogMaxChars = 200000;
+
 void AppendLog(HWND log_edit, const std::wstring& line) {
     int len = GetWindowTextLengthW(log_edit);
+    if (len > kLogMaxChars) {
+        // Drop the oldest third rather than trimming line-by-line — cheap, and avoids doing this
+        // on every single append once near the cap.
+        std::vector<wchar_t> buf(static_cast<size_t>(len) + 1);
+        GetWindowTextW(log_edit, buf.data(), len + 1);
+        std::wstring text(buf.data());
+        size_t cut = text.find(L'\n', text.size() / 3);
+        if (cut != std::wstring::npos) text.erase(0, cut + 1);
+        SetWindowTextW(log_edit, text.c_str());
+        len = GetWindowTextLengthW(log_edit);
+    }
     SendMessageW(log_edit, EM_SETSEL, static_cast<WPARAM>(len), static_cast<LPARAM>(len));
     std::wstring withNewline = line + L"\r\n";
     SendMessageW(log_edit, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(withNewline.c_str()));
@@ -181,9 +200,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             EnableWindow(stop, FALSE);
             mk(L"STATIC", L"Pronto.", 0, 235, 120, 260, 20, IDC_STATUS_STATIC);
 
-            mk(L"EDIT", L"",
-               WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 155, 485, 220,
-               IDC_LOG_EDIT);
+            HWND log_edit = mk(L"EDIT", L"",
+                                WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 155, 485,
+                                220, IDC_LOG_EDIT);
+            // Default EDIT control limit is ~32K characters; past that it silently stops accepting
+            // more text. 0 asks for the implementation's own maximum instead of a fixed number.
+            SendMessageW(log_edit, EM_LIMITTEXT, 0, 0);
             return 0;
         }
 

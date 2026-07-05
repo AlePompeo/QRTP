@@ -6,6 +6,33 @@ session.
 
 ## Resolved
 
+### First confirmed successful end-to-end transfer (small file) — but large files appear to freeze partway through (2026-07-05)
+
+**Good news first**: with the offset-splitting fix, the user completed a full, successful transfer
+of a small file — the protocol genuinely works end-to-end on real Windows hardware now.
+
+**Symptom**: large files take a very long time, and at some point *both* sender's and receiver's
+logs stop showing any new activity — looks like a freeze, on both sides simultaneously.
+
+**Root cause (log freeze specifically)**: the GUI's log `EDIT` control never had `EM_LIMITTEXT`
+raised, so it was silently capped at Win32's default ~32K-character limit. The verbose diagnostics
+added a few commits back (logging every single QR shown and every camera read) generate a lot of
+text for a large file — easily enough to hit that default limit partway through a long transfer,
+at which point the control just stops accepting more text. The underlying transfer was most likely
+still running; the log display had just stopped reflecting it, on *both* machines independently
+(same GUI code, same bug, same default limit, hit at roughly the same point since both sides log at
+a similar rate).
+
+**Fix**: `EM_LIMITTEXT` raised to the control's maximum at creation, plus periodic trimming (drop
+the oldest third once the log passes 200K characters) so the control doesn't just grow forever and
+get progressively slower to update on a very long transfer either.
+
+**Separately, not yet addressed**: large files genuinely being slow. This needs real data (a log
+excerpt from a large-file attempt, now that the log won't silently stop) before tuning anything
+further — enough AIMD/rendering parameters have already turned out to have non-obvious, sometimes
+counterproductive interactions (see the entries above) that changing more of them without evidence
+would just be more guessing.
+
 ### One specific offset never got through no matter how much EC was raised — raising EC on a fixed-size stuck chunk makes its QR modules smaller, not more robust (2026-07-05)
 
 **Symptom**: with the previous two fixes in place, real diagnostic logs finally showed the optical
