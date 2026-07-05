@@ -30,9 +30,14 @@ void print_usage() {
         "      Full send+receive transfer over an in-process loopback channel, with optional\n"
         "      synthetic loss/corruption (P in [0,1]). No camera/monitor required.\n\n"
 #ifdef QRTP_WITH_OPENCV
-        "  qrtp send <file> [--camera N] [--fps F] [--width W --height H]\n"
+        "  qrtp send <file> [--camera N] [--fps F] [--width W --height H] [--qr-grid N]\n"
         "      Send over the real optical link: renders QR frames to a window and reads\n"
         "      ACKs/SACKs back from camera index N (the peer's screen must face this camera).\n"
+        "      --qr-grid N (default 1, classic/original behavior) batches N frames into a single\n"
+        "      on-screen grid per display update instead of one at a time, decoded via OpenCV's\n"
+        "      detectAndDecodeMulti(). Experimental and opt-in — a runtime toggle specifically so\n"
+        "      it can be turned back off (to 1) without needing a rebuild if it doesn't hold up;\n"
+        "      must be set the same on both sides of the transfer.\n"
         "      --width/--height request a capture resolution from the camera — by default (no\n"
         "      flags) automatically requests the camera's own highest available mode (an\n"
         "      intentionally oversized request the driver clamps to its true max; OpenCV has no\n"
@@ -44,8 +49,9 @@ void print_usage() {
         "      testing showed the exact same request can be honored cleanly by one camera and\n"
         "      remapped to a worse mode by another. Check the logged \"camera opened: resolution\n"
         "      ...\" line to see what actually got negotiated either way.\n\n"
-        "  qrtp receive --out <dir> [--camera N] [--fps F] [--width W --height H]\n"
-        "      Receive over the real optical link. Same --width/--height caveat as above.\n");
+        "  qrtp receive --out <dir> [--camera N] [--fps F] [--width W --height H] [--qr-grid N]\n"
+        "      Receive over the real optical link. Same --width/--height and --qr-grid notes as\n"
+        "      above.\n");
 #else
         "  qrtp send / qrtp receive\n"
         "      Not available in this build — rebuild with `make WITH_OPENCV=1` after\n"
@@ -137,6 +143,7 @@ int cmd_send_optical(int argc, char** argv) {
         else if (a == "--fps" && i + 1 < argc) ocfg.fps = std::stod(argv[++i]);
         else if (a == "--width" && i + 1 < argc) ocfg.camera_width = std::stoi(argv[++i]);
         else if (a == "--height" && i + 1 < argc) ocfg.camera_height = std::stoi(argv[++i]);
+        else if (a == "--qr-grid" && i + 1 < argc) ocfg.qr_codes_per_frame = std::stoi(argv[++i]);
     }
     try {
         ocfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
@@ -162,6 +169,7 @@ int cmd_receive_optical(int argc, char** argv) {
         else if (a == "--fps" && i + 1 < argc) ocfg.fps = std::stod(argv[++i]);
         else if (a == "--width" && i + 1 < argc) ocfg.camera_width = std::stoi(argv[++i]);
         else if (a == "--height" && i + 1 < argc) ocfg.camera_height = std::stoi(argv[++i]);
+        else if (a == "--qr-grid" && i + 1 < argc) ocfg.qr_codes_per_frame = std::stoi(argv[++i]);
         else if (a == "--out" && i + 1 < argc) out_dir = argv[++i];
     }
     try {

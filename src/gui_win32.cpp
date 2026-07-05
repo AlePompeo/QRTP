@@ -48,6 +48,7 @@ constexpr int IDC_STOP_BTN = 108;
 constexpr int IDC_LOG_EDIT = 109;
 constexpr int IDC_STATUS_STATIC = 110;
 constexpr int IDC_RES_EDIT = 111;
+constexpr int IDC_QRGRID_EDIT = 112;
 
 // Custom messages posted from the worker thread to the UI thread. Never touch a control directly
 // from the worker thread — Win32 windows are single-threaded-affine, all updates must happen here.
@@ -122,8 +123,8 @@ std::wstring BrowseForFolder(HWND owner) {
 }
 
 // Runs on the worker thread. Never touches Win32 controls directly.
-void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_index, double fps,
-                  int camera_width, int camera_height) {
+void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_index, double fps, int camera_width,
+                  int camera_height, int qr_grid) {
     HWND hwnd = app->hwnd;
     auto post_log = [hwnd](const std::string& msg) {
         auto* copy = new std::wstring(Utf8ToWide(msg));
@@ -140,6 +141,7 @@ void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_in
         ocfg.fps = fps;
         ocfg.camera_width = camera_width;
         ocfg.camera_height = camera_height;
+        ocfg.qr_codes_per_frame = qr_grid;
         ocfg.log = post_log;
         qrtp::OpticalLink link(ocfg);
 
@@ -207,13 +209,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // to a worse mode by another.
             mk(L"EDIT", L"max", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
 
-            mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 115, 100, 28, IDC_START_BTN);
-            HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 115, 100, 28, IDC_STOP_BTN);
+            mk(L"STATIC", L"QR per frame:", 0, 10, 106, 100, 20, 0);
+            // Classic default "1" — exactly the original single-QR-at-a-time behavior. >1 is the
+            // experimental multi-QR-per-frame mode (see OpticalLinkConfig::qr_codes_per_frame): a
+            // runtime toggle, not a hard swap, specifically so it can be set back to 1 without
+            // needing a rebuild if it doesn't hold up on real hardware. Must match on both machines.
+            mk(L"EDIT", L"1", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 130, 103, 50, 22, IDC_QRGRID_EDIT);
+
+            mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 143, 100, 28, IDC_START_BTN);
+            HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 143, 100, 28, IDC_STOP_BTN);
             EnableWindow(stop, FALSE);
-            mk(L"STATIC", L"Pronto.", 0, 235, 120, 260, 20, IDC_STATUS_STATIC);
+            mk(L"STATIC", L"Pronto.", 0, 235, 148, 260, 20, IDC_STATUS_STATIC);
 
             HWND log_edit = mk(L"EDIT", L"",
-                                WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 155, 485,
+                                WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 183, 485,
                                 220, IDC_LOG_EDIT);
             // Default EDIT control limit is ~32K characters; past that it silently stops accepting
             // more text. 0 asks for the implementation's own maximum instead of a fixed number.
@@ -266,6 +275,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                 }
 
+                int qr_grid = GetDlgItemInt(hwnd, IDC_QRGRID_EDIT, nullptr, FALSE);
+                if (qr_grid <= 0) qr_grid = 1;
+
                 SetWindowTextW(GetDlgItem(hwnd, IDC_LOG_EDIT), L"");
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), is_send ? L"Invio in corso..." : L"Ricezione in corso...");
                 EnableWindow(GetDlgItem(hwnd, IDC_START_BTN), FALSE);
@@ -274,8 +286,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 app->cancel.store(false);
                 app->running.store(true);
                 if (app->worker.joinable()) app->worker.join(); // previous run already finished
-                app->worker =
-                    std::thread(RunTransfer, app, is_send, path_w, camera_index, fps, camera_width, camera_height);
+                app->worker = std::thread(RunTransfer, app, is_send, path_w, camera_index, fps, camera_width,
+                                           camera_height, qr_grid);
             } else if (id == IDC_STOP_BTN) {
                 app->cancel.store(true);
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), L"Arresto in corso...");
@@ -338,7 +350,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     AppState app;
 
     HWND hwnd = CreateWindowExW(0, kClassName, L"QRTP — Trasferimento file via QR", WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
-                                 CW_USEDEFAULT, CW_USEDEFAULT, 520, 430, nullptr, nullptr, hInstance, &app);
+                                 CW_USEDEFAULT, CW_USEDEFAULT, 520, 458, nullptr, nullptr, hInstance, &app);
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 

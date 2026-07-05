@@ -6,6 +6,62 @@ session.
 
 ## Resolved
 
+### Experimental multi-QR-per-frame mode, added as a runtime toggle instead of a hard swap (2026-07-05)
+
+User asked whether showing 2+ QR codes on screen at once (instead of one at a time) could help
+throughput — a real, different lever from just growing chunk size: the current display already
+wastes space on widescreen monitors (it sizes to 90% of the *smaller* screen dimension, a square
+area, leaving much of a 16:9 screen's width unused), so multiple QR codes could plausibly fit at
+close to the same per-module pixel density as one, rather than trading density for size the way a
+bigger single QR does. OpenCV's `cv::QRCodeDetector::detectAndDecodeMulti()` (confirmed present in
+the bundled 4.11.0 headers) makes decoding several codes from one captured frame directly
+supported, no extra dependency needed.
+
+Then, specifically to avoid repeating the COBS experience (a hard swap that needed a full git
+revert + rebuild + re-release once it broke on real hardware), the user asked for this to be two
+cleanly separated code paths behind a runtime toggle, not a replacement of the working path —
+exactly the pattern already used for `camera_width`/`camera_height`.
+
+**Implementation**: `OpticalLinkConfig::qr_codes_per_frame` (default `1`, the classic, extensively
+tested behavior — completely unmodified). `OpticalLink::send()`/`try_receive()` each start with a
+one-line dispatch (`if (cfg_.qr_codes_per_frame > 1) { return send_multi(...)/try_receive_multi(...); }`)
+and otherwise run their exact original bodies, untouched. All the new logic lives in three new
+private methods (`send_multi`, `flush_send_batch`, `try_receive_multi`) that the classic path never
+calls and can't be affected by:
+
+- `send_multi()` queues each Base64-encoded QR into `pending_send_batch_`; once it reaches
+  `qr_codes_per_frame`, `flush_send_batch()` lays them out in a simple square-ish grid (each QR
+  independently sized to its own module count via the same per-module-pixel logic as the classic
+  path, since a retransmit queued alongside fresh sends can carry an different-sized payload than
+  today's chunk size) and displays them as one combined image for one dwell period.
+- `try_receive_multi()` flushes any not-yet-full pending batch first (so whatever's been queued is
+  actually on screen before waiting for a reply — the same invariant the classic path gets for
+  free by rendering immediately), then decodes via `detectAndDecodeMulti()` and dedups against a
+  *set* of hashes (`last_decoded_hashes_`) representing the current on-screen batch's content,
+  since a capture can legitimately return anywhere from 0 to N decoded strings — a bad angle or
+  motion blur can cost just one QR in the grid, not necessarily all of them, so each is judged
+  independently rather than requiring the whole batch to match before accepting any of it. Returns
+  one decoded payload per call (queuing any extras) so `try_receive()`'s existing one-frame-per-call
+  contract — and therefore all of `protocol.cpp`'s Sender/Receiver logic — needs zero changes.
+
+Exposed as `--qr-grid N` (CLI, both `send`/`receive`) and a new "QR per frame:" GUI field (default
+"1"). Must be set the same on both sides of a transfer (mismatched grid sizes were not designed for
+and aren't validated).
+
+**Verified**: `make test` (the native, non-OpenCV build doesn't compile any of this at all, since
+it's gated behind `QRTP_WITH_OPENCV` same as the rest of `optical_link.cpp` — confirms the classic
+path's test coverage is completely unaffected), a full loopback demo transfer, and the OpenCV-
+enabled Windows cross-compile (including the resized/relaid-out GUI) all pass/build cleanly.
+
+**Not verified on real hardware** — this is a substantial, first-of-its-kind feature (spatial
+rather than temporal multiplexing) with real open questions the loopback tests can't exercise
+(camera field-of-view resolution across a wider capture area, whether `detectAndDecodeMulti`
+behaves as reliably as `detectAndDecode` on this hardware, whether the grid layout is legible at
+real camera-to-screen distances). Given it's a runtime toggle defaulting to off, the expected
+failure mode this time is graceful: set `--qr-grid 1` (or clear the GUI field back to "1") to fall
+back to the classic path instantly, no code revert needed — the entire point of building it this
+way per the user's own request.
+
 ### Default fps raised to 24; added TCP-style fast retransmit for isolated frame losses (2026-07-05)
 
 User request: default fps to 24 at startup, and address the real bottleneck they'd observed —

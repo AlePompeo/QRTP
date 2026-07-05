@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <mutex>
 #include <stdexcept>
@@ -185,6 +186,11 @@ void OpticalLink::set_fps(double fps) { cfg_.fps = fps; }
 void OpticalLink::set_ec_level(ECLevel level) { cfg_.ec_level = static_cast<QrEcLevel>(static_cast<uint8_t>(level)); }
 
 void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
+    if (cfg_.qr_codes_per_frame > 1) {
+        send_multi(frame_bytes);
+        return;
+    }
+
     using Clock = std::chrono::steady_clock;
     auto ms_since = [](Clock::time_point t0) {
         return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
@@ -252,6 +258,10 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
 }
 
 bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) {
+    if (cfg_.qr_codes_per_frame > 1) {
+        return try_receive_multi(out, timeout);
+    }
+
     using Clock = std::chrono::steady_clock;
     auto* ct = capture_thread(capture_thread_);
 
@@ -324,6 +334,172 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
         // call; try_receive() previously only slept, so neither window ever processed a message
         // while only receiving was happening, which Windows eventually reports as "Not
         // Responding" and can crash — this call is what was missing, not just cosmetic.
+        cv::waitKey(1);
+    }
+    return false;
+}
+
+// ============================================================================================
+// Experimental multi-QR-per-frame path (OpticalLinkConfig::qr_codes_per_frame > 1). Nothing here
+// runs, and nothing above this point behaves any differently, unless a caller explicitly opts in —
+// see the config field's own comment for why this is a runtime toggle rather than a hard swap.
+// ============================================================================================
+
+void OpticalLink::send_multi(const std::vector<uint8_t>& frame_bytes) {
+    // Same Base64 step as the classic path (see send()'s own comment for why) — just queued
+    // instead of immediately rendered, so several can be laid out in one grid together.
+    const std::string encoded_text = base64_encode(frame_bytes);
+    const std::vector<uint8_t> encoded_bytes(encoded_text.begin(), encoded_text.end());
+    pending_send_batch_.push_back(qr_encode_bytes(encoded_bytes, cfg_.ec_level));
+    if (static_cast<int>(pending_send_batch_.size()) >= cfg_.qr_codes_per_frame) {
+        flush_send_batch();
+    }
+}
+
+void OpticalLink::flush_send_batch() {
+    if (pending_send_batch_.empty()) return;
+
+    const int n = static_cast<int>(pending_send_batch_.size());
+    // Simple square-ish grid — fine for the small N (2-4) this is meant for; not worth a smarter
+    // bin-packer for a handful of cells.
+    const int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(n))));
+    const int rows = static_cast<int>(std::ceil(static_cast<double>(n) / cols));
+
+    const int quiet = 4;
+    const int cell_target = static_cast<int>(0.85 * std::min(screen_w_ / cols, screen_h_ / rows));
+
+    // Each QR gets its own scale/side computed independently (versions can differ — e.g. a
+    // retransmit queued alongside fresh sends carries whatever payload size it was originally
+    // split to, not necessarily today's chunk size), same per-module-pixel logic as the classic
+    // path. All cells share the *largest* side so the grid stays uniform; smaller QRs are centered
+    // within their cell rather than stretched.
+    std::vector<int> sides(pending_send_batch_.size());
+    int max_side = 0, max_scale = 0;
+    for (size_t i = 0; i < pending_send_batch_.size(); ++i) {
+        const int modules_per_side = pending_send_batch_[i].width + 2 * quiet;
+        const int scale = std::max(4, cell_target / modules_per_side);
+        sides[i] = modules_per_side * scale;
+        max_side = std::max(max_side, sides[i]);
+        max_scale = std::max(max_scale, scale);
+    }
+
+    cv::Mat canvas(max_side * rows, max_side * cols, CV_8UC1, cv::Scalar(255));
+    for (size_t i = 0; i < pending_send_batch_.size(); ++i) {
+        const auto& qr = pending_send_batch_[i];
+        const int modules_per_side = qr.width + 2 * quiet;
+        cv::Mat small(modules_per_side, modules_per_side, CV_8UC1, cv::Scalar(255));
+        for (int y = 0; y < qr.width; ++y) {
+            uint8_t* row = small.ptr<uint8_t>(y + quiet) + quiet;
+            for (int x = 0; x < qr.width; ++x) {
+                row[x] = qr.modules[static_cast<size_t>(y) * qr.width + x] ? 0 : 255;
+            }
+        }
+        cv::Mat one;
+        cv::resize(small, one, cv::Size(sides[i], sides[i]), 0, 0, cv::INTER_NEAREST);
+
+        const int cell_row = static_cast<int>(i) / cols;
+        const int cell_col = static_cast<int>(i) % cols;
+        const int off_x = cell_col * max_side + (max_side - sides[i]) / 2;
+        const int off_y = cell_row * max_side + (max_side - sides[i]) / 2;
+        one.copyTo(canvas(cv::Rect(off_x, off_y, sides[i], sides[i])));
+    }
+
+    const int canvas_w = canvas.cols, canvas_h = canvas.rows;
+    if (canvas_w != last_window_side_) {
+        cv::resizeWindow(out_window_name_, canvas_w, canvas_h);
+        cv::moveWindow(out_window_name_, std::max(0, (screen_w_ - canvas_w) / 2),
+                        std::max(0, (screen_h_ - canvas_h) / 2));
+        last_window_side_ = canvas_w;
+    }
+
+    cv::imshow(out_window_name_, canvas);
+    if (cfg_.log) {
+        cfg_.log("[optical] showing " + std::to_string(n) + " QR(s) in a " + std::to_string(cols) + "x" +
+                  std::to_string(rows) + " grid, max_module_px=" + std::to_string(max_scale));
+    }
+    cv::waitKey(static_cast<int>(1000.0 / std::max(1.0, cfg_.fps)));
+    pending_send_batch_.clear();
+}
+
+bool OpticalLink::try_receive_multi(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) {
+    using Clock = std::chrono::steady_clock;
+    // A batch send() queued but didn't fill (e.g. the window-fill loop ran out of new offsets
+    // before reaching qr_codes_per_frame) must actually reach the screen before we start waiting
+    // for a reply to it — same invariant the classic path gets for free by rendering immediately.
+    flush_send_batch();
+
+    if (!pending_decoded_.empty()) {
+        out = std::move(pending_decoded_.front());
+        pending_decoded_.pop_front();
+        return true;
+    }
+
+    auto* ct = capture_thread(capture_thread_);
+    const auto deadline = Clock::now() + timeout;
+    while (Clock::now() < deadline) {
+        cv::Mat gray;
+        double capture_ms = 0.0;
+        bool got_new = false;
+        {
+            std::unique_lock<std::mutex> lock(ct->mtx);
+            const auto wait_until = std::min(deadline, Clock::now() + std::chrono::milliseconds(20));
+            ct->cv_ready.wait_until(lock, wait_until,
+                                     [&] { return ct->generation != last_seen_generation_ || ct->stop.load(); });
+            if (ct->generation != last_seen_generation_) {
+                gray = ct->latest_gray;
+                capture_ms = ct->last_capture_ms;
+                last_seen_generation_ = ct->generation;
+                got_new = true;
+            }
+        }
+
+        if (got_new && !gray.empty()) {
+            capture_ms_accum_ += capture_ms;
+            if (++preview_frame_counter_ % 3 == 0) cv::imshow(camera_window_name_, gray);
+
+            const auto t_decode_start = Clock::now();
+            std::vector<std::string> decoded_texts;
+            det(detector_)->detectAndDecodeMulti(gray, decoded_texts);
+            decode_ms_accum_ += std::chrono::duration<double, std::milli>(Clock::now() - t_decode_start).count();
+            ++poll_count_since_last_decode_;
+
+            // Dedup against "what's currently on screen" the same way the classic path does with
+            // a single hash, just generalized to a set: a capture can legitimately return anywhere
+            // from 0 to N decoded strings (motion blur or a bad angle can cost just one QR in the
+            // grid, not necessarily all of them), so each decoded string is judged independently
+            // rather than requiring the whole batch to match before accepting any of it.
+            std::vector<uint32_t> current_hashes;
+            std::vector<std::vector<uint8_t>> new_payloads;
+            for (const auto& text : decoded_texts) {
+                if (text.empty()) continue;
+                const uint32_t h = crc32(reinterpret_cast<const uint8_t*>(text.data()), text.size());
+                current_hashes.push_back(h);
+                if (std::find(last_decoded_hashes_.begin(), last_decoded_hashes_.end(), h) ==
+                    last_decoded_hashes_.end()) {
+                    new_payloads.push_back(base64_decode(text));
+                }
+            }
+            if (!current_hashes.empty()) last_decoded_hashes_ = std::move(current_hashes);
+
+            if (!new_payloads.empty()) {
+                if (cfg_.log) {
+                    const int n = std::max(1, poll_count_since_last_decode_);
+                    cfg_.log("[optical] camera read " + std::to_string(new_payloads.size()) + " NEW QR(s) (of " +
+                              std::to_string(decoded_texts.size()) + " decoded this capture) avg_capture_ms=" +
+                              std::to_string(capture_ms_accum_ / n) + " avg_decode_ms=" +
+                              std::to_string(decode_ms_accum_ / n));
+                }
+                capture_ms_accum_ = 0.0;
+                decode_ms_accum_ = 0.0;
+                poll_count_since_last_decode_ = 0;
+
+                for (auto& payload : new_payloads) pending_decoded_.push_back(std::move(payload));
+                out = std::move(pending_decoded_.front());
+                pending_decoded_.pop_front();
+                cv::waitKey(1);
+                return true;
+            }
+        }
         cv::waitKey(1);
     }
     return false;

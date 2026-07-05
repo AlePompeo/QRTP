@@ -2,6 +2,7 @@
 #ifdef QRTP_WITH_OPENCV
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <string>
 #include <vector>
@@ -38,6 +39,16 @@ struct OpticalLinkConfig {
     // frame validation. Wire it to the same sink as ProtocolConfig::log to see both in one place —
     // essential for telling "camera never sees a QR" apart from "sees one, gets rejected."
     std::function<void(const std::string&)> log;
+    // Classic default: exactly one QR per displayed frame — the original, extensively real-
+    // hardware-tested behavior, completely untouched by this option. >1 batches that many
+    // send()'d frames into a single on-screen grid (e.g. 2 shows side by side) and decodes
+    // multiple QR codes from one captured frame via cv::QRCodeDetector::detectAndDecodeMulti() —
+    // an experimental, opt-in mode (see not_working.md, 2026-07-05). Deliberately a runtime
+    // toggle rather than a hard swap of the existing path, specifically so it can be turned off
+    // again (set back to 1) without needing a code revert if it doesn't hold up on real hardware
+    // — see send_multi()/try_receive_multi() in optical_link.cpp, which are the *only* code this
+    // touches; send()/try_receive() run the exact original code, unmodified, whenever this is 1.
+    int qr_codes_per_frame = 1;
 };
 
 // The real physical layer: send() renders a QR frame to an on-screen window; try_receive() polls
@@ -63,6 +74,14 @@ public:
     void set_ec_level(ECLevel level) override;
 
 private:
+    // The experimental multi-QR-per-frame path (see OpticalLinkConfig::qr_codes_per_frame) —
+    // send()/try_receive() dispatch to these only when that's >1; otherwise they run their
+    // original bodies untouched. Kept as clearly separate methods rather than branches threaded
+    // through the classic code, precisely so the classic path can't be affected by this at all.
+    void send_multi(const std::vector<uint8_t>& frame_bytes);
+    void flush_send_batch();
+    bool try_receive_multi(std::vector<uint8_t>& out, std::chrono::milliseconds timeout);
+
     OpticalLinkConfig cfg_;
     std::string out_window_name_;    // shows the QR we're sending — what the other side's camera reads
     std::string camera_window_name_; // our own camera preview — purely local, for aiming/feedback
@@ -90,6 +109,11 @@ private:
     double capture_ms_accum_ = 0.0;
     double decode_ms_accum_ = 0.0;
     int poll_count_since_last_decode_ = 0;
+
+    // multi-QR mode only (qr_codes_per_frame > 1) — untouched, unused whenever it's 1.
+    std::vector<QrMatrix> pending_send_batch_;       // accumulated by send_multi(), flushed as a grid
+    std::deque<std::vector<uint8_t>> pending_decoded_; // decoded payloads not yet returned to the caller
+    std::vector<uint32_t> last_decoded_hashes_;      // hashes of the currently-on-screen batch's content
 };
 
 } // namespace qrtp
