@@ -214,7 +214,15 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
 
             for (const auto& range : parse_sack_ranges(f->payload)) {
                 auto it = inflight.find(range.first);
-                if (it != inflight.end()) {
+                // Matching on offset alone isn't enough: if this offset was since split into
+                // smaller pieces (a stuck-offset retry — see the timeout branch below), `inflight`
+                // now holds a *different*, smaller in-flight entry under the same key. A SACK range
+                // reporting the *old*, pre-split size at that offset is evidence for data the
+                // receiver had before the split, not for whatever is in flight now — erasing on
+                // offset match alone would let the sender believe this (still-unacknowledged)
+                // smaller piece was received, permanently starving that byte range of any further
+                // retransmission and leaving a silent gap only the final SHA-256 check would catch.
+                if (it != inflight.end() && it->second.bytes.size() == range.second) {
                     adaptive_.on_rtt_sample(
                         std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - it->second.sent_at));
                     if (it->second.retries > 0) any_was_retried = true;
@@ -411,6 +419,41 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
                 log("DATA received: offset=" + std::to_string(f->seq) + " len=" + std::to_string(f->payload.size()) +
                     " cumulative_before=" + std::to_string(cumulative));
                 if (static_cast<uint64_t>(f->seq) >= cumulative) {
+                    // A real bug found on large files (2026-07-05, see not_working.md): when a
+                    // stuck offset gets split into smaller pieces (below), those pieces land at NEW
+                    // keys strictly inside the still-present original entry's range — the
+                    // "smaller-or-equal wins" check right below only protects the *exact same* key,
+                    // it never looks at whether a *different*, smaller key already covers part of
+                    // an existing *larger* key's range. If a split's first sub-piece (which always
+                    // reuses the original's own key) is the one that gets lost, the original,
+                    // now-stale, larger entry never gets overwritten at all — it just sits there
+                    // holding the same key while later sub-pieces of the same split accumulate at
+                    // their own new keys inside its range. advance_cumulative() below only follows
+                    // one specific chain of keys (jumping by whatever size currently sits at each
+                    // one), so it can walk straight through that stale larger entry to the correct
+                    // total length — but the final reassembly loop concatenates *every* entry in
+                    // the map regardless of which chain advance_cumulative() actually walked,
+                    // duplicating whatever byte range both the stale entry and its newer, finer
+                    // replacements cover. Truncating the predecessor here — the moment a new key is
+                    // accepted strictly inside an existing, smaller-keyed entry's range — keeps that
+                    // predecessor's own already-correct prefix (up to where the new arrival starts)
+                    // while ceding the rest to the finer-grained pieces now arriving separately, so
+                    // the two never overlap in the first place.
+                    if (!chunks.empty()) {
+                        auto pred = chunks.upper_bound(f->seq);
+                        if (pred != chunks.begin()) {
+                            --pred;
+                            if (pred->first < static_cast<uint64_t>(f->seq) &&
+                                pred->first + pred->second.size() > static_cast<uint64_t>(f->seq)) {
+                                log("truncating stale chunk at offset " + std::to_string(pred->first) + " (" +
+                                    std::to_string(pred->second.size()) + " bytes) to " +
+                                    std::to_string(f->seq - pred->first) +
+                                    " bytes — superseded by a more finely re-chunked arrival at offset " +
+                                    std::to_string(f->seq));
+                                pred->second.resize(f->seq - pred->first);
+                            }
+                        }
+                    }
                     // Re-chunking (protocol.cpp: Sender splits a stuck offset into smaller pieces)
                     // only ever shrinks a chunk, never grows one back — so if we already have
                     // something stored at this exact offset and the new arrival is *larger*, it can
@@ -470,9 +513,23 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
     // --- Verify + teardown ---
     std::vector<uint8_t> full;
     full.reserve(meta_out.filesize);
+    // advance_cumulative() above only proves *a* contiguous chain of keys reaches filesize — it
+    // doesn't prove every entry actually in `chunks` lies on that chain. A stale/orphaned entry
+    // left over from a superseded chunking decision (see the SACK-range-length check above, added
+    // for exactly this class of bug) would still be visited by this loop, since it walks every map
+    // entry unconditionally. Logging any offset that doesn't land exactly where expected turns a
+    // silent wrong reassembly into an actionable diagnostic instead of just a hash mismatch with no
+    // clue why — see not_working.md, 2026-07-05, for a real user report of this on large files.
+    uint64_t expected_off = 0;
     for (const auto& [off, bytes] : chunks) {
-        (void)off;
+        if (off != expected_off && cfg_.log) {
+            log("reassembly inconsistency: expected next chunk at offset " + std::to_string(expected_off) +
+                " but found one at " + std::to_string(off) + " (" + std::to_string(bytes.size()) + " bytes) — " +
+                (off > expected_off ? "gap" : "overlap") +
+                " of " + std::to_string(off > expected_off ? off - expected_off : expected_off - off) + " bytes");
+        }
         full.insert(full.end(), bytes.begin(), bytes.end());
+        expected_off = off + bytes.size();
         if (full.size() >= meta_out.filesize) break;
     }
     full.resize(meta_out.filesize);

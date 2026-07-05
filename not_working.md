@@ -6,6 +6,59 @@ session.
 
 ## Resolved
 
+### Fixed a real hash-mismatch bug on large files — stale chunk overlapping a re-split one (2026-07-05)
+
+**Symptom**: user reported hash mismatches "often" on large files. Reproduced reliably in a
+loopback demo transfer (2MB random file, `--loss 0.1 --corrupt 0.02` — the same rates used
+successfully many times earlier this session on smaller files) — the receiver logged
+"HASH MISMATCH" after a clean-looking transfer completion. Loopback rules out camera/optical
+factors entirely: `LoopbackLink` (`src/link.cpp`) is a strict FIFO queue per direction (fixed
+latency, no reordering), and a single-bit flip is mathematically always caught by CRC32 (not
+probabilistic), so every frame that reaches `chunks[]` is byte-perfect on its own — this was a
+pure protocol logic bug, not a decode/corruption issue.
+
+**Root cause, traced from a real captured log**: when a "stuck offset" (an unacknowledged in-flight
+DATA frame) times out, `Sender::send_file()` splits it into smaller sub-pieces — the *first*
+sub-piece always reuses the original offset as its own key, but later sub-pieces land at *new*,
+higher keys strictly inside the original's byte range (`sub_off = original_off + i`). If that
+*first* sub-piece is the one that gets lost optically, the receiver's `chunks[original_off]` entry
+never gets overwritten — it just sits there at its old, larger size — while the *later* sub-pieces
+(which are new keys, not overwrites) get accepted normally, since the existing "smaller-or-equal
+wins" check (`not_working.md`, various earlier entries) only ever compares an arrival against
+whatever's *at that exact key*, never against a *different*, smaller key whose range the new
+arrival falls inside. `advance_cumulative()` still reaches the correct total length by walking
+straight through the stale, oversized entry (it only follows one specific chain of keys, jumping by
+whatever size currently sits at each one) — but the final reassembly loop concatenates *every*
+entry in the map regardless of which chain `advance_cumulative()` walked, so it includes *both* the
+stale entry and the newer, finer-grained pieces that overlap part of its range, duplicating those
+bytes in the output. Confirmed byte-for-byte in a real log: offset 93623 (1024 bytes) never got its
+first replacement sub-piece; its second sub-piece landed at the new key 94305 (342 bytes); the
+stale 1024-byte entry at 93623 and the new 342-byte entry at 94305 then both existed simultaneously,
+overlapping by exactly the amount logged. Larger files simply have far more DATA frames and re-split
+events, so far more chances for this specific race to land.
+
+**Fix**: two changes in `Receiver::receive_file()` (`protocol.cpp`). (1) The real fix — right before
+accepting a new arrival, check whether the immediate predecessor key in `chunks` (found via
+`chunks.upper_bound(f->seq)`, stepped back one) has a range that extends past this new offset; if
+so, truncate that predecessor's stored bytes down to just the correct prefix (`f->seq - pred->first`
+bytes), ceding the rest to the finer-grained pieces now arriving separately, so the two ranges never
+overlap in the map at all. (2) A diagnostic safety net in the final reassembly loop — logs loudly if
+any *other*, not-yet-found inconsistency slips through (walking `chunks` while tracking the expected
+running offset, reporting a gap or overlap by name and size instead of silently producing wrong
+bytes) — this is what actually caught and pinpointed the bug above; left in place since a naive
+"blindly concatenate every map entry" loop has no other way to notice this class of problem. Also
+hardened the *sender's* own SACK-range handling (`Sender::send_file()`) to require the reported
+length match what's currently in flight at that offset before erasing it — a SACK range citing a
+stale, pre-split size at an offset shouldn't be treated as evidence the *current* (already
+re-split) in-flight entry there was received.
+
+**Verified**: `make test` (all checks pass), the *exact* 2MB loopback transfer that reliably
+reproduced the bug before the fix, re-run 4 times consecutively after the fix — all 4 succeeded
+with hash verified, byte-for-byte identical output, and zero reassembly-inconsistency log lines
+(previously: reliably failed, with 5-34 logged overlaps per run). Also re-verified the smaller,
+previously-passing demo case, native build, and the Windows cross-compile (all three .exe targets)
+build/pass cleanly.
+
 ### Made AdaptiveConfig::chunk_size_max runtime-overridable (2026-07-05)
 
 **Ask**: expose the QR payload density ceiling (`AdaptiveConfig::chunk_size_max`, default 1024
