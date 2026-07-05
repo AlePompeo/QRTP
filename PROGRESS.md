@@ -386,3 +386,48 @@ real large-file timing report before considering it settled.
 pattern described, not from fresh diagnostic logs; `make test` and the full loopback suite still
 pass, but real hardware confirmation that the burst/slowdown alternation has actually smoothed out
 is pending.
+
+## Optimization pass (2026-07-05, same day) — reverse (SACK) channel never adapted its own fps
+
+User reported the (by-then-correct) transfer as still "a bit slow" and asked for further
+optimization. Found one clear architecture gap and one clear artificial ceiling, both by reading
+the actual send/receive code paths rather than guessing at new constants:
+
+1. **The receiver's outgoing SACK display never adapted.** `sack_every_n_frames = 1` means every
+   single `DATA` frame gets an immediate `SACK` reply — correct and necessary (see the v1 fix
+   above), but that SACK is a real displayed QR frame subject to the same `cv::waitKey(1000/fps)`
+   dwell as any other. Only `Sender` ever called `link_.set_fps()`/`set_ec_level()`; `Receiver` had
+   no `AdaptiveController` at all, so its reverse channel stayed pinned at whatever fixed fps was
+   passed on its own CLI/GUI invocation (default 3.0) for the *entire* transfer — no matter how high
+   the sender's forward channel got tuned. Since every `DATA` frame requires exactly one SACK round
+   trip, the reverse channel's static, conservative rate caps the whole transfer's throughput
+   regardless of how well the forward channel performs. This is the more likely dominant bottleneck
+   for "everything works correctly but is still slow," now that the v1–v13 correctness bugs are
+   fixed.
+
+   **Fix:** `Receiver` now owns its own `AdaptiveController` (`protocol.hpp`/`protocol.cpp`), fed
+   from the only loss/clean signal available on that side: the `RETRANSMIT` flag on incoming `DATA`
+   (a retransmit means a previous SACK likely didn't arrive in time). `send_sack()` now pushes
+   `adaptive_.fps()`/`ec_level()` into the link before every send, so the reverse channel ramps up
+   and backs off with the same AIMD logic the forward channel already uses — two independent
+   controllers on two independent simplex channels, matching the project's own "dual-simplex full
+   duplex" design intent, which previously only actually applied to one direction.
+
+2. **`chunk_size_max` (1500 bytes) was an arbitrary round number, not a computed limit.** Chunk size
+   only climbs this high once EC level is already at its most permissive (`L`) — `upshift()` grows
+   chunk size first and only steps EC level down once chunk is maxed — so the real ceiling is
+   version-40's byte-mode capacity at EC=L (2953 bytes, ISO/IEC 18004) minus the ~33% Base64
+   expansion and 23-byte frame overhead: `base64_len(chunk + 23) <= 2953` → `chunk <= ~2191`. Raised
+   to 2048 (leaves ~5% margin). This only matters once the channel is already clean enough for AIMD
+   to have climbed this far — same self-correcting downshift/offset-splitting logic as before
+   protects against it being too large for a given camera/lighting setup, exactly as it already does
+   for `fps_max`.
+
+Verified: `make clean && make && make test` — all checks pass, including a full randomized
+loopback transfer (byte-for-byte + SHA-256 match) at 5% loss / 3% corruption, observed reaching
+`chunk=965`+ mid-transfer without incident. Windows binaries (`qrtp.exe`/`qrtp_tests.exe`/
+`qrtp_gui.exe`) rebuilt via the MinGW cross-toolchain, confirmed as valid PE32+ binaries.
+**Not yet confirmed on real hardware** — `LoopbackLink` treats `set_fps()`/`set_ec_level()` as
+no-ops (no physical display to throttle), so the loopback suite verifies correctness but can't
+demonstrate the actual speedup; that requires a real two-PC optical transfer, same as every other
+tuning change in this log.

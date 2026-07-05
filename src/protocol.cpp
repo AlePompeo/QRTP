@@ -321,7 +321,8 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
 // Receiver
 // ============================================================================================
 
-Receiver::Receiver(ILink& link, ProtocolConfig cfg) : link_(link), cfg_(std::move(cfg)) {}
+Receiver::Receiver(ILink& link, ProtocolConfig cfg)
+    : link_(link), cfg_(std::move(cfg)), adaptive_(cfg_.adaptive) {}
 
 void Receiver::log(const std::string& msg) const {
     if (cfg_.log) cfg_.log("[receiver] " + msg);
@@ -350,6 +351,8 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
     if (!got_syn) return std::nullopt;
     log("SYN received: " + meta_out.filename + " (" + std::to_string(meta_out.filesize) + " bytes)");
 
+    link_.set_fps(adaptive_.fps());
+    link_.set_ec_level(adaptive_.ec_level());
     Frame syn_ack;
     syn_ack.type = FrameType::SYN_ACK;
     syn_ack.session_id = session_id;
@@ -360,6 +363,7 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
     std::map<uint64_t, std::vector<uint8_t>> chunks;
     uint64_t cumulative = 0;
     uint32_t frames_since_sack = 0;
+    bool any_retransmit_since_sack = false;
     bool fin_seen = false;
 
     auto advance_cumulative = [&] {
@@ -371,6 +375,11 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
     };
 
     auto send_sack = [&] {
+        // Always push the current adaptive fps/EC level before displaying — this is the reverse
+        // channel's only throttle, so every send here (including the FIN-nudge/final-ack paths
+        // below, not just the main per-DATA-frame case) should reflect it.
+        link_.set_fps(adaptive_.fps());
+        link_.set_ec_level(adaptive_.ec_level());
         std::vector<std::pair<uint64_t, uint32_t>> ranges;
         for (const auto& [off, bytes] : chunks) {
             if (off > cumulative) ranges.emplace_back(off, static_cast<uint32_t>(bytes.size()));
@@ -428,11 +437,17 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
                 // most visible once the window has shrunk to 1: with only one frame ever in
                 // flight, sack_every_n_frames' batching would otherwise never be reached by fresh
                 // arrivals alone) — answer immediately instead of waiting for the batching count.
+                // It's also the only loss signal this side has for its own reverse channel: a
+                // retransmit means a previous SACK likely didn't get through in time.
                 const bool starved_for_ack = (f->flags_byte & flags::RETRANSMIT) != 0;
+                if (starved_for_ack) any_retransmit_since_sack = true;
                 if (starved_for_ack || frames_since_sack >= cfg_.sack_every_n_frames ||
                     (f->flags_byte & flags::LAST_FRAME) || cumulative >= meta_out.filesize) {
+                    if (any_retransmit_since_sack) adaptive_.record_loss_event();
+                    else adaptive_.record_clean_round();
                     send_sack();
                     frames_since_sack = 0;
+                    any_retransmit_since_sack = false;
                 }
                 continue;
             }

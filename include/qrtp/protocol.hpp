@@ -80,6 +80,13 @@ public:
 private:
     ILink& link_;
     ProtocolConfig cfg_;
+    // Drives the reverse (SACK) channel's own fps/EC level. Without this, the receiver's outgoing
+    // SACK — sent after every single DATA frame by design (see sack_every_n_frames) — always
+    // displayed at the fixed startup fps, capping round-trip throughput at that rate no matter how
+    // far the sender's own AIMD ramped up the forward channel. Fed from the RETRANSMIT flag on
+    // incoming DATA (the only loss/clean signal available on this side): a retransmit means the
+    // previous SACK(s) likely didn't get through in time.
+    AdaptiveController adaptive_;
 
     void log(const std::string& msg) const;
     bool cancelled() const;
