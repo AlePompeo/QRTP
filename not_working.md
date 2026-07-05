@@ -6,6 +6,74 @@ session.
 
 ## Resolved
 
+### Replaced Base64 with COBS: ~33% more real file bytes per QR at the same chunk size (2026-07-05)
+
+User asked for alternative techniques to embed more bytes per QR *without* enlarging chunk size —
+i.e., reduce wire-format overhead rather than push chunk size (and QR density/reliability risk)
+further.
+
+**Root cause of the "waste"**: `OpticalLink::send()` Base64-encoded every frame before rendering,
+solely because `cv::QRCodeDetector::detectAndDecode()` returns a `std::string` built in a way
+that isn't guaranteed safe for embedded `0x00` bytes (real hardware testing established this
+empirically — see the Base64 introduction entry further down this log). Base64 solves that by
+restricting the output to printable ASCII text, at a real cost: ~33% expansion (`base64_len(n) =
+4*ceil(n/3)`). But the actual failure mode is specifically about *zero bytes*, not binary content
+in general — Base64 was solving a narrower problem with a much bigger hammer than it needed.
+
+**Fix**: replaced Base64 with COBS (Consistent Overhead Byte Stuffing, Cheshire & Baker 1999) —
+`cobs.hpp`/`cobs.cpp`, new. COBS eliminates every zero byte from arbitrary binary data at a
+bounded cost of at most 1 extra byte per 254 input bytes (~0.4% worst case), a small fraction of
+Base64's ~33%. Same QR capacity, same chunk size, same EC level → meaningfully more real file
+bytes per frame, or equivalently a smaller/less dense (more reliable) QR for the same chunk size.
+`libqrencode`'s `QRcode_encodeData` already accepts raw binary directly (unchanged) — COBS's
+output just goes straight in, no intermediate text representation needed at all.
+
+**A necessary follow-up fix, easy to miss**: `AdaptiveController::max_chunk_for_ec_level()` (added
+earlier this session as a safety cap — see the chunk_size_max entry above) computed its ceiling
+assuming Base64's `4*ceil(n/3)` expansion. Left unchanged, it would have under-used the real
+headroom COBS provides (overly conservative, not unsafe) — updated to COBS's actual worst-case
+bound (`cobs_len(n) <= n + n/254 + 1`), raising the safe per-EC-level ceiling by roughly the same
+~33% (e.g. EC=L: 2191 -> 2917 bytes).
+
+**Deliberately not implemented, with reasons**: a further, larger win exists via Base45 (or
+similar) combined with `libqrencode`'s `QRcode_encodeString` entry point instead of the currently-
+used `QRcode_encodeData` — QR's own Alphanumeric mode packs 2 chars/11 bits, and Base45's alphabet
+was specifically designed to match it (used for exactly this reason in the EU's digital COVID
+certificate QR codes), which would beat even COBS's efficiency. Not pursued this pass: it requires
+adding a new dlopen'd libqrencode ABI surface (a new function signature to get exactly right across
+both Linux and Windows, the same category of thing that's bitten this project before — see the
+Windows port's MSVC calling-convention caveats), on top of a new encoding scheme, whereas COBS
+needed neither.
+
+**Cleanup**: removed `base64.hpp`/`base64.cpp` and `test_base64()` entirely — no longer called
+anywhere (verified via full-codebase grep before deleting); git history has the old implementation
+if Base64 ever needs to come back.
+
+**Verified**: added `test_cobs()` with the same rigor `test_base64()` had — RFC-free since COBS
+has no equivalent standard test vectors, but explicit zero-byte/empty/single-byte cases, the
+254/255/256-byte block-boundary edge cases specifically (where COBS must split a run even without
+an actual zero present), malformed/truncated-input safety (mirroring `decode_frame()`'s defensive
+posture), and a round-trip of every length 0..1600 of random bytes with an explicit assertion that
+the encoded form *never* contains a zero byte. `make test`, a full randomized loopback transfer
+(byte-for-byte + hash match), native build, and the OpenCV-enabled Windows cross-compile all
+pass/build cleanly.
+
+**Not verified on real camera hardware** — same as the auto-max-resolution entry below, this is
+new territory: every previous real-hardware confirmation of the optical channel was validated
+with *Base64* output (pure 7-bit-ASCII), never genuinely arbitrary 8-bit binary. The specific,
+narrower open question is whether `cv::QRCodeDetector`'s `std::string` construction is safe for
+the *full* byte range (0x01-0xFF) or only empirically confirmed safe for printable ASCII — COBS is
+reasoned to be safe based on the documented failure mode being specifically about zero bytes, not
+a guess, but "reasoned" is not the same as "confirmed," and if real hardware shows a full decode
+failure (not just slowness) rather than the expected improvement, this specific change is the
+first thing to revert.
+
+Also applied in the same pass: `chunk_size_max` lowered 1500 -> 1024 by explicit request. Combined
+with the COBS switch, 1024 today produces a meaningfully smaller/less dense QR than 1024 did under
+the old Base64 encoding (COBS needs far fewer QR-capacity bytes for the same chunk), so this is a
+larger reliability margin than the same-looking constant provided before this pass, not merely a
+repeat of an earlier value.
+
 ### User request: auto-detect the camera's highest-quality mode, and speed up AIMD ramp-up (2026-07-05)
 
 Decoding was reported as still very slow. Two explicit asks:

@@ -9,19 +9,26 @@ namespace qrtp {
 namespace {
 
 // Version-40 (the largest QR symbol) byte-mode capacity per EC level, ISO/IEC 18004 — the hard
-// ceiling a chunk size must respect once Base64 expansion (base64_len(n) = 4*ceil(n/3)) and the
-// fixed frame header/CRC overhead are accounted for. chunk_size_max alone doesn't guarantee this:
-// upshift() grows chunk size first and only improves EC level once chunk is already at *its*
-// ceiling, but EC level can still be sitting at a worse setting left over from an earlier
-// downshift while chunk size climbs back up — nothing previously stopped that combination from
-// asking qr_encode_bytes() to encode a payload that doesn't fit any version at the current EC
-// level, which throws (see qr_encoder.cpp) and would hard-fail the transfer with an unhandled
-// exception, regardless of what chunk_size_max was configured to.
+// ceiling a chunk size must respect once the wire-format expansion (COBS, see cobs.hpp — was
+// Base64 until this was switched over, see not_working.md 2026-07-05) and the fixed frame
+// header/CRC overhead are accounted for. chunk_size_max alone doesn't guarantee this: upshift()
+// grows chunk size first and only improves EC level once chunk is already at *its* ceiling, but EC
+// level can still be sitting at a worse setting left over from an earlier downshift while chunk
+// size climbs back up — nothing previously stopped that combination from asking qr_encode_bytes()
+// to encode a payload that doesn't fit any version at the current EC level, which throws (see
+// qr_encoder.cpp) and would hard-fail the transfer with an unhandled exception, regardless of what
+// chunk_size_max was configured to.
 constexpr size_t kVersion40Capacity[4] = {2953, 2331, 1663, 1273}; // indexed by ECLevel: L, M, Q, H
 
 size_t max_chunk_for_ec_level(ECLevel level) {
     const size_t capacity = kVersion40Capacity[static_cast<uint8_t>(level)];
-    const size_t max_frame_bytes = (capacity / 4) * 3; // largest n with 4*ceil(n/3) <= capacity
+    if (capacity < 2) return 0;
+    // COBS's worst case is 1 overhead byte per <=254 input bytes plus 1 initial code byte, i.e.
+    // cobs_len(n) <= n + n/254 + 1 — so the largest encodable n satisfies
+    // n*(255/254) <= capacity - 1, n <= (capacity-1)*254/255. A conservative (rounds down) bound,
+    // not an exact inverse, which is fine for a safety ceiling: it only needs to never
+    // under-estimate the true cost, not hit it exactly.
+    const size_t max_frame_bytes = (capacity - 1) * 254 / 255;
     return max_frame_bytes > kFixedOverhead ? max_frame_bytes - kFixedOverhead : 0;
 }
 
