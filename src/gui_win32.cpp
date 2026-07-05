@@ -51,6 +51,7 @@ constexpr int IDC_RES_EDIT = 111;
 constexpr int IDC_QRGRID_EDIT = 112;
 constexpr int IDC_MJPEG_CHECK = 113;
 constexpr int IDC_FOCUS_CHECK = 114;
+constexpr int IDC_WECHAT_CHECK = 115;
 
 // Custom messages posted from the worker thread to the UI thread. Never touch a control directly
 // from the worker thread — Win32 windows are single-threaded-affine, all updates must happen here.
@@ -126,7 +127,8 @@ std::wstring BrowseForFolder(HWND owner) {
 
 // Runs on the worker thread. Never touches Win32 controls directly.
 void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_index, double fps, int camera_width,
-                  int camera_height, int qr_grid, bool request_mjpeg, bool disable_autofocus) {
+                  int camera_height, int qr_grid, bool request_mjpeg, bool disable_autofocus,
+                  bool use_wechat_qrcode) {
     HWND hwnd = app->hwnd;
     auto post_log = [hwnd](const std::string& msg) {
         auto* copy = new std::wstring(Utf8ToWide(msg));
@@ -146,6 +148,7 @@ void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_in
         ocfg.qr_codes_per_frame = qr_grid;
         ocfg.request_mjpeg = request_mjpeg;
         ocfg.disable_autofocus = disable_autofocus;
+        ocfg.use_wechat_qrcode = use_wechat_qrcode;
         ocfg.log = post_log;
         qrtp::OpticalLink link(ocfg);
 
@@ -235,6 +238,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // fast-changing on-screen content is a candidate, not a confirmed fix.
             mk(L"BUTTON", L"Blocca autofocus", BS_AUTOCHECKBOX, 10, 127, 160, 20, IDC_FOCUS_CHECK);
 
+            // Unchecked by default (see OpticalLinkConfig::use_wechat_qrcode): untested on real
+            // hardware. Needs detect.prototxt/detect.caffemodel/sr.prototxt/sr.caffemodel in a
+            // "models/wechat_qrcode" folder next to this executable — see models/wechat_qrcode/
+            // LICENSE. Must match on both sides of the transfer.
+            mk(L"BUTTON", L"Usa WeChatQRCode (CNN)", BS_AUTOCHECKBOX, 200, 127, 200, 20, IDC_WECHAT_CHECK);
+
             mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 163, 100, 28, IDC_START_BTN);
             HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 163, 100, 28, IDC_STOP_BTN);
             EnableWindow(stop, FALSE);
@@ -298,6 +307,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (qr_grid <= 0) qr_grid = 1;
                 bool request_mjpeg = IsDlgButtonChecked(hwnd, IDC_MJPEG_CHECK) == BST_CHECKED;
                 bool disable_autofocus = IsDlgButtonChecked(hwnd, IDC_FOCUS_CHECK) == BST_CHECKED;
+                bool use_wechat_qrcode = IsDlgButtonChecked(hwnd, IDC_WECHAT_CHECK) == BST_CHECKED;
 
                 SetWindowTextW(GetDlgItem(hwnd, IDC_LOG_EDIT), L"");
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), is_send ? L"Invio in corso..." : L"Ricezione in corso...");
@@ -308,7 +318,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 app->running.store(true);
                 if (app->worker.joinable()) app->worker.join(); // previous run already finished
                 app->worker = std::thread(RunTransfer, app, is_send, path_w, camera_index, fps, camera_width,
-                                           camera_height, qr_grid, request_mjpeg, disable_autofocus);
+                                           camera_height, qr_grid, request_mjpeg, disable_autofocus,
+                                           use_wechat_qrcode);
             } else if (id == IDC_STOP_BTN) {
                 app->cancel.store(true);
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), L"Arresto in corso...");

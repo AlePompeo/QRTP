@@ -31,7 +31,7 @@ void print_usage() {
         "      synthetic loss/corruption (P in [0,1]). No camera/monitor required.\n\n"
 #ifdef QRTP_WITH_OPENCV
         "  qrtp send <file> [--camera N] [--fps F] [--width W --height H] [--qr-grid N] [--no-mjpeg]\n"
-        "                   [--lock-focus]\n"
+        "                   [--lock-focus] [--wechat-qrcode] [--wechat-model-dir DIR]\n"
         "      Send over the real optical link: renders QR frames to a window and reads\n"
         "      ACKs/SACKs back from camera index N (the peer's screen must face this camera).\n"
         "      --qr-grid N (default 1, classic/original behavior) batches N frames into a single\n"
@@ -57,11 +57,20 @@ void print_usage() {
         "      together sharply right at a fps transition on a genuine two-machine setup, which\n"
         "      doesn't fit pure camera-hardware cost — continuous autofocus hunting under fast-\n"
         "      changing on-screen content is one candidate explanation; not yet confirmed on real\n"
-        "      hardware.\n\n"
+        "      hardware.\n"
+        "      --wechat-qrcode decodes using OpenCV's WeChatQRCode (opencv_contrib: an SSD-style\n"
+        "      detector CNN plus a super-resolution step for small/blurry crops) instead of the\n"
+        "      classic cv::QRCodeDetector (off by default). Needs detect.prototxt, detect.caffemodel,\n"
+        "      sr.prototxt, sr.caffemodel in a \"models/wechat_qrcode\" folder next to this executable\n"
+        "      (or wherever --wechat-model-dir points) — see models/wechat_qrcode/LICENSE for their\n"
+        "      source and terms. Experimental: expected to cost somewhat more CPU per attempt than\n"
+        "      the classic detector, in exchange for (unverified on real hardware) better detection\n"
+        "      of small/blurry/angled codes; must be set the same on both sides.\n\n"
         "  qrtp receive --out <dir> [--camera N] [--fps F] [--width W --height H] [--qr-grid N]\n"
-        "                          [--no-mjpeg] [--lock-focus]\n"
-        "      Receive over the real optical link. Same --width/--height, --qr-grid, --no-mjpeg and\n"
-        "      --lock-focus notes as above.\n");
+        "                          [--no-mjpeg] [--lock-focus] [--wechat-qrcode]\n"
+        "                          [--wechat-model-dir DIR]\n"
+        "      Receive over the real optical link. Same --width/--height, --qr-grid, --no-mjpeg,\n"
+        "      --lock-focus, --wechat-qrcode and --wechat-model-dir notes as above.\n");
 #else
         "  qrtp send / qrtp receive\n"
         "      Not available in this build — rebuild with `make WITH_OPENCV=1` after\n"
@@ -156,6 +165,8 @@ int cmd_send_optical(int argc, char** argv) {
         else if (a == "--qr-grid" && i + 1 < argc) ocfg.qr_codes_per_frame = std::stoi(argv[++i]);
         else if (a == "--no-mjpeg") ocfg.request_mjpeg = false;
         else if (a == "--lock-focus") ocfg.disable_autofocus = true;
+        else if (a == "--wechat-qrcode") ocfg.use_wechat_qrcode = true;
+        else if (a == "--wechat-model-dir" && i + 1 < argc) ocfg.wechat_qrcode_model_dir = argv[++i];
     }
     try {
         ocfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
@@ -184,6 +195,8 @@ int cmd_receive_optical(int argc, char** argv) {
         else if (a == "--qr-grid" && i + 1 < argc) ocfg.qr_codes_per_frame = std::stoi(argv[++i]);
         else if (a == "--no-mjpeg") ocfg.request_mjpeg = false;
         else if (a == "--lock-focus") ocfg.disable_autofocus = true;
+        else if (a == "--wechat-qrcode") ocfg.use_wechat_qrcode = true;
+        else if (a == "--wechat-model-dir" && i + 1 < argc) ocfg.wechat_qrcode_model_dir = argv[++i];
         else if (a == "--out" && i + 1 < argc) out_dir = argv[++i];
     }
     try {

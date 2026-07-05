@@ -6,6 +6,67 @@ session.
 
 ## Resolved
 
+### Integrated WeChatQRCode as an opt-in decoder, chosen over zxing-cpp (2026-07-05)
+
+**Context**: after comparing OpenCV's classic `cv::QRCodeDetector` against two alternatives
+(zxing-cpp, a standalone library; `cv::wechat_qrcode::WeChatQRCode`, an opencv_contrib module —
+an SSD-style detector CNN plus a super-resolution enhancement step for small/blurry crops), picked
+WeChatQRCode: it needs no new third-party dependency (it's a module of the same OpenCV this project
+already links against), and its detection reliability is reportedly strong exactly where this
+project's real logs have repeatedly shown trouble — small/blurry/angled QR codes, which is a
+decode-*reliability* problem, the dominant bottleneck this whole session's evidence has pointed at
+(retries/downshifts cost far more than a few extra ms of per-attempt CPU).
+
+**Build complication (the real cost of this integration)**: the Windows cross-compile's OpenCV was
+not the Fedora system package (which already ships wechat_qrcode+dnn) but a separately-built,
+deliberately minimal custom OpenCV (`BUILD_LIST=core,imgproc,imgcodecs,videoio,highgui,objdetect`,
+`WITH_QT=OFF`, `WITH_GSTREAMER=OFF`, `WITH_GDAL=OFF`) — confirmed by testing: linking against the
+Fedora package pulled in a ~90-DLL transitive closure (Qt5, GStreamer, GDAL, FFmpeg, and more),
+completely at odds with this project's portable-single-folder distribution. Rebuilt the same custom
+OpenCV tree from source instead, adding `opencv_contrib`'s `wechat_qrcode` module and enabling `dnn`
+(with `WITH_PROTOBUF=ON`/`BUILD_PROTOBUF=ON` so protobuf is statically bundled into
+`libopencv_dnn4110.dll` rather than pulling in a separate `libprotobuf-30.dll`) — replicating every
+other `WITH_*`/`BUILD_*` flag from the original cache exactly, to avoid silently reintroducing any
+of that bloat. Net new runtime dependency: just `iconv.dll` (verified via a full transitive
+dependency-closure walk with `objdump`, not assumed).
+
+**Real build-environment failure hit along the way**: the rebuild first crashed under `-j6` — not
+from raw compiler memory alone (a `journalctl` OOM-killer log showed only ~300MB total across the
+`cc1plus` processes at kill time) but because the entire OpenCV source+build tree lived under
+`/tmp`, which is a 2GB **tmpfs** (RAM-backed) on this machine, not real disk — so the build's own
+on-disk footprint was directly competing with process RAM. The specific failure
+(`ar: unable to copy file 'objects.a'; reason: Success`) is the classic symptom of an ENOSPC hitting
+a buggy errno-to-string path. Fixed by relocating the entire build tree to real disk before
+resuming, and rebuilding with `-j1` to keep peak concurrent compiler memory low given this
+machine's 3.8GB total RAM. Lost the ~168 already-compiled `.o` files for the `dnn` module in the
+process (a full CMake reconfigure — unavoidable, needed to restore the toolchain file and the exact
+`WITH_*` flag set — refreshes `flags.make`/`build.make`, which `make` treats as invalidating
+everything depending on them), so `dnn` was recompiled from scratch single-threaded; slower, but it
+completed cleanly with no further crashes.
+
+**Fix**: added `OpticalLinkConfig::use_wechat_qrcode` (opt-in, default `false` — untested on real
+camera hardware, unlike the MJPEG default which reflects a confirmed A/B) and
+`wechat_qrcode_model_dir` (defaults to a `models/wechat_qrcode` folder next to the running
+executable, resolved via `GetModuleFileNameW`, matching the existing "next to the .exe" convention
+already used for `libqrencode.dll`). `optical_link.cpp` branches at both decode call sites
+(`try_receive()`/`try_receive_multi()`) between the classic detector and
+`cv::wechat_qrcode::WeChatQRCode::detectAndDecode()` (which conveniently already returns multiple
+strings per call, mapping directly onto the existing multi-QR path with no separate "multi" method
+needed). Wired through `--wechat-qrcode`/`--wechat-model-dir` on both `qrtp send`/`qrtp receive`,
+and a new "Usa WeChatQRCode (CNN)" checkbox (unchecked by default) in the Win32 GUI. The 4 required
+model files (`detect.prototxt`, `detect.caffemodel`, `sr.prototxt`, `sr.caffemodel`, from
+github.com/WeChatCV/opencv_3rdparty branch `wechat_qrcode` — the canonical source
+opencv_contrib's own module points at, Apache-2.0 licensed) are committed under `models/
+wechat_qrcode/` and bundled into `dist-windows.zip` at the same relative path.
+
+**Verified**: `make test` (all checks pass), a full loopback demo transfer (byte-for-byte identical
++ hash match), native build, and the Windows cross-compile (all three .exe targets, linked against
+the newly-rebuilt custom OpenCV with `dnn`+`wechat_qrcode`) build cleanly — dependency closure
+re-verified with `objdump` against the new binaries specifically, not assumed from the module list.
+NOT verified on real camera hardware — whether WeChatQRCode's detector actually improves decode
+success rate on this project's real optical channel, and what its added per-attempt CPU cost looks
+like in practice, are both still open questions.
+
 ### Compared against jtalbott22/optical-data-bridge: fixed a real receiver-side fps gap, added decode downscaling (2026-07-05)
 
 **Ask**: user pointed at github.com/jtalbott22/optical-data-bridge (a browser-based, single-HTML-file

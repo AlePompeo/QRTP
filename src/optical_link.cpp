@@ -3,6 +3,7 @@
 
 #include <opencv2/objdetect.hpp>
 #include <opencv2/opencv.hpp>
+#include <opencv2/wechat_qrcode.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -25,6 +26,31 @@ namespace qrtp {
 namespace {
 cv::VideoCapture* cap(void* p) { return reinterpret_cast<cv::VideoCapture*>(p); }
 cv::QRCodeDetector* det(void* p) { return reinterpret_cast<cv::QRCodeDetector*>(p); }
+cv::wechat_qrcode::WeChatQRCode* wechat_det(void* p) {
+    return reinterpret_cast<cv::wechat_qrcode::WeChatQRCode*>(p);
+}
+
+// Resolves OpticalLinkConfig::wechat_qrcode_model_dir when left empty: a "models/wechat_qrcode"
+// folder next to the running executable, the same "next to the .exe" convention already used for
+// libqrencode.dll (see qr_encoder.cpp's LoadLibrary comment) — keeps the distributed dist-windows.zip
+// self-contained without needing an install step or environment variable. Falls back to a plain
+// relative path on non-Windows, since this project's OpenCV/GUI path is Windows-primary (CAP_DSHOW,
+// the Win32 GUI) and this fallback is never exercised by the automated tests either way.
+std::string default_wechat_model_dir() {
+#ifdef _WIN32
+    wchar_t path[MAX_PATH];
+    const DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    std::wstring wpath(path, (len > 0 && len < MAX_PATH) ? len : 0);
+    const auto pos = wpath.find_last_of(L'\\');
+    const std::wstring dir = (pos != std::wstring::npos) ? wpath.substr(0, pos) : L".";
+    const int size = WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string narrow(static_cast<size_t>(std::max(0, size - 1)), '\0');
+    if (size > 1) WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, narrow.data(), size, nullptr, nullptr);
+    return narrow + "\\models\\wechat_qrcode";
+#else
+    return "models/wechat_qrcode";
+#endif
+}
 
 // Bounds decode cost independent of whatever resolution the camera negotiated: cv::QRCodeDetector's
 // per-attempt cost tracks the *input* image's pixel count, not just the QR's own module count (real
@@ -143,6 +169,30 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
     capture_ = new cv::VideoCapture(cfg_.camera_index);
 #endif
     detector_ = new cv::QRCodeDetector();
+
+    // Opt-in (see OpticalLinkConfig::use_wechat_qrcode) — loaded eagerly here, not lazily on first
+    // decode, so a missing/misplaced model file fails loudly at startup (matching how a missing
+    // camera index fails below) instead of surfacing as a confusing per-frame decode failure deep
+    // into a transfer.
+    if (cfg_.use_wechat_qrcode) {
+        const std::string model_dir =
+            cfg_.wechat_qrcode_model_dir.empty() ? default_wechat_model_dir() : cfg_.wechat_qrcode_model_dir;
+#ifdef _WIN32
+        const std::string sep = "\\";
+#else
+        const std::string sep = "/";
+#endif
+        try {
+            wechat_detector_ = new cv::wechat_qrcode::WeChatQRCode(
+                model_dir + sep + "detect.prototxt", model_dir + sep + "detect.caffemodel",
+                model_dir + sep + "sr.prototxt", model_dir + sep + "sr.caffemodel");
+        } catch (const std::exception& e) {
+            throw std::runtime_error(
+                "OpticalLink: failed to load WeChatQRCode models from \"" + model_dir +
+                "\" (expects detect.prototxt, detect.caffemodel, sr.prototxt, sr.caffemodel there): " + e.what());
+        }
+    }
+
     if (!cap(capture_)->isOpened()) {
         throw std::runtime_error("OpticalLink: cannot open camera index " + std::to_string(cfg_.camera_index));
     }
@@ -231,7 +281,8 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
                   std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_HEIGHT))) + requested_desc +
                   " fourcc=" + std::string(fourcc_chars) +
                   (cfg_.request_mjpeg ? " (mjpeg requested)" : " (mjpeg not requested)") +
-                  (cfg_.disable_autofocus ? " (autofocus disabled)" : " (autofocus left on)"));
+                  (cfg_.disable_autofocus ? " (autofocus disabled)" : " (autofocus left on)") +
+                  (cfg_.use_wechat_qrcode ? " (decoder=WeChatQRCode)" : " (decoder=classic)"));
     }
 
     capture_thread_ = new CaptureThread(cap(capture_));
@@ -241,6 +292,7 @@ OpticalLink::~OpticalLink() {
     delete capture_thread(capture_thread_); // stops + joins the background thread first
     delete cap(capture_);
     delete det(detector_);
+    delete wechat_det(wechat_detector_);
     cv::destroyWindow(out_window_name_);
     cv::destroyWindow(camera_window_name_);
 }
@@ -365,7 +417,17 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
             // matters for decode latency and for keeping the window responsive.
             if (++preview_frame_counter_ % 3 == 0) cv::imshow(camera_window_name_, gray);
             const auto t_decode_start = Clock::now();
-            const std::string decoded_text = det(detector_)->detectAndDecode(downscale_for_decode(gray));
+            const cv::Mat decode_input = downscale_for_decode(gray);
+            std::string decoded_text;
+            if (cfg_.use_wechat_qrcode) {
+                // Can return more than one decoded string even here (its detector doesn't assume a
+                // single QR) — the classic path's own invariant is "one QR on screen at a time," so
+                // just take the first result, same as detectAndDecode()'s single-string contract.
+                const std::vector<std::string> results = wechat_det(wechat_detector_)->detectAndDecode(decode_input);
+                if (!results.empty()) decoded_text = results.front();
+            } else {
+                decoded_text = det(detector_)->detectAndDecode(decode_input);
+            }
             decode_ms_accum_ += std::chrono::duration<double, std::milli>(Clock::now() - t_decode_start).count();
             ++poll_count_since_last_decode_;
             if (!decoded_text.empty()) {
@@ -522,8 +584,15 @@ bool OpticalLink::try_receive_multi(std::vector<uint8_t>& out, std::chrono::mill
             if (++preview_frame_counter_ % 3 == 0) cv::imshow(camera_window_name_, gray);
 
             const auto t_decode_start = Clock::now();
+            const cv::Mat decode_input = downscale_for_decode(gray);
             std::vector<std::string> decoded_texts;
-            det(detector_)->detectAndDecodeMulti(downscale_for_decode(gray), decoded_texts);
+            if (cfg_.use_wechat_qrcode) {
+                // Its detectAndDecode() already returns every code found in one call — no separate
+                // "multi" entry point needed, unlike the classic detector.
+                decoded_texts = wechat_det(wechat_detector_)->detectAndDecode(decode_input);
+            } else {
+                det(detector_)->detectAndDecodeMulti(decode_input, decoded_texts);
+            }
             decode_ms_accum_ += std::chrono::duration<double, std::milli>(Clock::now() - t_decode_start).count();
             ++poll_count_since_last_decode_;
 

@@ -85,6 +85,26 @@ struct OpticalLinkConfig {
     // — see send_multi()/try_receive_multi() in optical_link.cpp, which are the *only* code this
     // touches; send()/try_receive() run the exact original code, unmodified, whenever this is 1.
     int qr_codes_per_frame = 1;
+    // Opt-in, default false — untested on real camera hardware (2026-07-05). When true, decodes
+    // using cv::wechat_qrcode::WeChatQRCode (opencv_contrib: a small SSD-style detector CNN plus a
+    // super-resolution enhancement step for small/blurry crops) instead of the classic
+    // cv::QRCodeDetector. Chosen over an alternative under consideration (zxing-cpp, a separate
+    // third-party library) specifically because it adds no new dependency or build pipeline: it's a
+    // module of the same OpenCV this project already links against, and the Windows cross-compile's
+    // system mingw64-opencv package already ships libopencv_wechat_qrcode + its libopencv_dnn
+    // dependency. The classic path (this flag false) is completely untouched — see
+    // wechat_qrcode_model_dir below for the 4 model files this needs that OpenCV itself doesn't
+    // bundle. Motivation: this project's whole session of real-hardware logs pointed at decode
+    // *reliability* (frames that never resolve, driving retries/downshifts), not raw per-attempt
+    // decode cost, as the dominant remaining bottleneck — a stronger detector attacks that directly,
+    // even though each attempt likely costs somewhat more CPU than the classical approach.
+    bool use_wechat_qrcode = false;
+    // Directory containing detect.prototxt, detect.caffemodel, sr.prototxt, sr.caffemodel (from
+    // github.com/WeChatCV/opencv_3rdparty, branch wechat_qrcode — the canonical source
+    // opencv_contrib's own wechat_qrcode module points at). Empty (default) resolves to a
+    // "models/wechat_qrcode" folder next to the running executable, matching how libqrencode.dll
+    // is expected next to qrtp.exe (see qr_encoder.cpp) — set explicitly to point elsewhere.
+    std::string wechat_qrcode_model_dir;
 };
 
 // The real physical layer: send() renders a QR frame to an on-screen window; try_receive() polls
@@ -123,6 +143,7 @@ private:
     std::string camera_window_name_; // our own camera preview — purely local, for aiming/feedback
     void* capture_ = nullptr;  // cv::VideoCapture* (kept opaque so this header stays OpenCV-free)
     void* detector_ = nullptr; // cv::QRCodeDetector*
+    void* wechat_detector_ = nullptr; // cv::wechat_qrcode::WeChatQRCode*, only if cfg_.use_wechat_qrcode
     // Runs cap->read() + the grayscale conversion continuously on its own thread, independent of
     // whatever try_receive() happens to be doing (see optical_link.cpp's CaptureThread) — real
     // timing data showed capture and decode as two comparable, sequential costs (up to ~45ms and
