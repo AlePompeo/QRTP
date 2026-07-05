@@ -431,3 +431,20 @@ loopback transfer (byte-for-byte + SHA-256 match) at 5% loss / 3% corruption, ob
 no-ops (no physical display to throttle), so the loopback suite verifies correctness but can't
 demonstrate the actual speedup; that requires a real two-PC optical transfer, same as every other
 tuning change in this log.
+
+## Logging: file size + elapsed seconds at transfer completion (2026-07-05, same day)
+
+User asked for the log to report, at the end of a transfer, how many bytes moved and how many
+seconds it took — useful now that throughput itself (not just correctness) is the thing being
+tuned. Added to `protocol.cpp`:
+
+- `Sender::send_file`: starts a clock right after the handshake completes ("ACK sent, connection
+  established"), logs `transfer finished: N bytes in S.SSSSSSs` right after teardown succeeds.
+- `Receiver::receive_file`: starts a clock right after `SYN` is parsed, logs the same
+  size/duration alongside the existing hash-verified/HASH MISMATCH line.
+
+Both start their clock just after the handshake rather than at function entry, so the two sides'
+numbers are roughly comparable (excludes handshake-retry variance, which can differ a lot between
+the two ends on a real optical link). Verified via `make test` and a real `demo` run (5% loss/3%
+corruption): both sender and receiver logged matching sizes and elapsed times
+(`50000 bytes in 0.286s`, sender and receiver agreeing to within ~1ms).
