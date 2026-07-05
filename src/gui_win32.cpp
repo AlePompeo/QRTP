@@ -47,6 +47,7 @@ constexpr int IDC_START_BTN = 107;
 constexpr int IDC_STOP_BTN = 108;
 constexpr int IDC_LOG_EDIT = 109;
 constexpr int IDC_STATUS_STATIC = 110;
+constexpr int IDC_RES_EDIT = 111;
 
 // Custom messages posted from the worker thread to the UI thread. Never touch a control directly
 // from the worker thread — Win32 windows are single-threaded-affine, all updates must happen here.
@@ -121,7 +122,8 @@ std::wstring BrowseForFolder(HWND owner) {
 }
 
 // Runs on the worker thread. Never touches Win32 controls directly.
-void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_index, double fps) {
+void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_index, double fps,
+                  int camera_width, int camera_height) {
     HWND hwnd = app->hwnd;
     auto post_log = [hwnd](const std::string& msg) {
         auto* copy = new std::wstring(Utf8ToWide(msg));
@@ -136,6 +138,8 @@ void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_in
         qrtp::OpticalLinkConfig ocfg;
         ocfg.camera_index = camera_index;
         ocfg.fps = fps;
+        ocfg.camera_width = camera_width;
+        ocfg.camera_height = camera_height;
         ocfg.log = post_log;
         qrtp::OpticalLink link(ocfg);
 
@@ -194,6 +198,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             mk(L"EDIT", L"0", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 110, 77, 50, 22, IDC_CAMERA_EDIT);
             mk(L"STATIC", L"FPS:", 0, 175, 80, 40, 20, 0);
             mk(L"EDIT", L"3", WS_BORDER | ES_AUTOHSCROLL, 220, 77, 50, 22, IDC_FPS_EDIT);
+            mk(L"STATIC", L"Ris. (LxA):", 0, 285, 80, 85, 20, 0);
+            // Blank by default = leave the camera's own resolution alone (see OpticalLinkConfig —
+            // forcing one automatically was tried and helped one camera while hurting another on
+            // real hardware). Opt-in: fill in e.g. "1280x720" to try a specific one on this machine.
+            mk(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 375, 77, 100, 22, IDC_RES_EDIT);
 
             mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 115, 100, 28, IDC_START_BTN);
             HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 115, 100, 28, IDC_STOP_BTN);
@@ -233,6 +242,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 double fps = wcstod(fps_buf, nullptr);
                 if (fps <= 0.0) fps = 3.0;
 
+                // Optional "WxH" (e.g. "1280x720"); left blank, both stay 0 and OpticalLink leaves
+                // the camera's resolution alone (see the field's own comment above for why this is
+                // opt-in rather than an automatic default).
+                int camera_width = 0, camera_height = 0;
+                wchar_t res_buf[32];
+                GetDlgItemTextW(hwnd, IDC_RES_EDIT, res_buf, 32);
+                if (const wchar_t* x_pos = wcschr(res_buf, L'x')) {
+                    camera_width = _wtoi(res_buf);
+                    camera_height = _wtoi(x_pos + 1);
+                    if (camera_width <= 0 || camera_height <= 0) camera_width = camera_height = 0;
+                }
+
                 SetWindowTextW(GetDlgItem(hwnd, IDC_LOG_EDIT), L"");
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), is_send ? L"Invio in corso..." : L"Ricezione in corso...");
                 EnableWindow(GetDlgItem(hwnd, IDC_START_BTN), FALSE);
@@ -241,7 +262,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 app->cancel.store(false);
                 app->running.store(true);
                 if (app->worker.joinable()) app->worker.join(); // previous run already finished
-                app->worker = std::thread(RunTransfer, app, is_send, path_w, camera_index, fps);
+                app->worker =
+                    std::thread(RunTransfer, app, is_send, path_w, camera_index, fps, camera_width, camera_height);
             } else if (id == IDC_STOP_BTN) {
                 app->cancel.store(true);
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), L"Arresto in corso...");

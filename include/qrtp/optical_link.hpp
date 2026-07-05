@@ -1,6 +1,7 @@
 #pragma once
 #ifdef QRTP_WITH_OPENCV
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -16,6 +17,14 @@ struct OpticalLinkConfig {
     // algorithm lock on; 10fps (100ms/frame) proved too fast for real hardware in testing.
     double fps = 3.0;
     QrEcLevel ec_level = QrEcLevel::M;
+    // 0 (default) means "don't ask" — leave the camera at whatever resolution it opens with. Real
+    // two-machine testing showed forcing a resolution automatically for everyone is unsafe: the
+    // exact same request (1280x720) was honored cleanly by one machine's camera and silently
+    // remapped to a different, worse-performing mode by the other's. Opt-in only, per machine —
+    // set both to a positive value to request it; the actual negotiated size (which a camera can
+    // still override) is always logged so what really happened is never just assumed.
+    int camera_width = 0;
+    int camera_height = 0;
     // Optional diagnostics from the optical layer itself (distinct from ProtocolConfig::log):
     // whether the camera is detecting any QR content at all, and whether decoded text survives
     // frame validation. Wire it to the same sink as ProtocolConfig::log to see both in one place —
@@ -51,6 +60,16 @@ private:
     std::string camera_window_name_; // our own camera preview — purely local, for aiming/feedback
     void* capture_ = nullptr;  // cv::VideoCapture* (kept opaque so this header stays OpenCV-free)
     void* detector_ = nullptr; // cv::QRCodeDetector*
+    // Runs cap->read() + the grayscale conversion continuously on its own thread, independent of
+    // whatever try_receive() happens to be doing (see optical_link.cpp's CaptureThread) — real
+    // timing data showed capture and decode as two comparable, sequential costs (up to ~45ms and
+    // ~90ms respectively) in the old single-threaded loop; overlapping them across CPU cores hides
+    // capture time behind decode time instead of paying both on every attempt. All HighGUI calls
+    // (imshow/waitKey/window creation) still happen only on the thread that owns this OpticalLink,
+    // never on this background thread — it only ever touches the camera and does color conversion,
+    // neither of which is a windowing operation with a thread-affinity requirement.
+    void* capture_thread_ = nullptr; // CaptureThread* (opaque, see optical_link.cpp)
+    uint64_t last_seen_generation_ = 0; // last capture-thread frame generation this side consumed
     std::vector<uint8_t> last_decoded_hash_;
     int screen_w_ = 1000;
     int screen_h_ = 1000;

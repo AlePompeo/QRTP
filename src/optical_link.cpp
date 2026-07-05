@@ -5,8 +5,12 @@
 #include <opencv2/opencv.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 
 #include "qrtp/base64.hpp"
 #include "qrtp/crc32.hpp"
@@ -20,6 +24,59 @@ namespace qrtp {
 namespace {
 cv::VideoCapture* cap(void* p) { return reinterpret_cast<cv::VideoCapture*>(p); }
 cv::QRCodeDetector* det(void* p) { return reinterpret_cast<cv::QRCodeDetector*>(p); }
+
+// Captures frames continuously in the background so try_receive() never has to block on
+// cap->read() itself — it just picks up whatever the latest ready frame is. Only ever touches the
+// camera (cap->read) and does a color-space conversion (cv::cvtColor); no HighGUI call
+// (imshow/waitKey/window) ever happens here, since those need to stay on the thread that created
+// the windows (see optical_link.hpp's class comment on why this matters on Windows).
+struct CaptureThread {
+    cv::VideoCapture* capture;
+    std::mutex mtx;
+    std::condition_variable cv_ready;
+    cv::Mat latest_gray;
+    uint64_t generation = 0;
+    double last_capture_ms = 0.0;
+    std::atomic<bool> stop{false};
+    std::thread worker;
+
+    explicit CaptureThread(cv::VideoCapture* c) : capture(c) {
+        worker = std::thread([this] { run(); });
+    }
+
+    ~CaptureThread() {
+        stop.store(true);
+        cv_ready.notify_all();
+        if (worker.joinable()) worker.join();
+    }
+
+    void run() {
+        using Clock = std::chrono::steady_clock;
+        while (!stop.load()) {
+            const auto t0 = Clock::now();
+            cv::Mat frame;
+            const bool ok = capture->read(frame) && !frame.empty();
+            const double capture_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+            if (!ok) continue; // camera hiccup — cap->read() already paces this, just retry
+
+            cv::Mat gray;
+            if (frame.channels() > 1) {
+                cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+            } else {
+                gray = frame;
+            }
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                latest_gray = std::move(gray);
+                last_capture_ms = capture_ms;
+                ++generation;
+            }
+            cv_ready.notify_all();
+        }
+    }
+};
+
+CaptureThread* capture_thread(void* p) { return reinterpret_cast<CaptureThread*>(p); }
 } // namespace
 
 OpticalLink::OpticalLink(OpticalLinkConfig cfg)
@@ -55,22 +112,34 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
         throw std::runtime_error("OpticalLink: cannot open camera index " + std::to_string(cfg_.camera_index));
     }
 
-    // Deliberately does NOT request a specific resolution (e.g. CAP_PROP_FRAME_WIDTH/HEIGHT) —
-    // tried exactly that (1280x720) and real two-machine hardware data showed it's not safe to
-    // assume: the sending machine's camera honored it exactly and got much faster captures, but
-    // the receiving machine's camera ignored the requested height, snapped to a different native
-    // mode (1280x1024, more total pixels) instead, and avg_decode_ms got roughly 4-5x *worse*
-    // there. Forcing a resolution is camera/driver-dependent in ways that can't be predicted from
-    // this dev environment — leave the camera's own default alone and just report what it turned
-    // out to be, so at least this is known rather than assumed.
+    // Only requests a resolution if the caller explicitly opted in (camera_width/height > 0) —
+    // real two-machine hardware data showed forcing one automatically for everyone is unsafe: the
+    // exact same request (1280x720) was honored cleanly by one machine's camera and silently
+    // remapped to a different, worse-performing mode by the other's. Left as an explicit,
+    // per-machine choice instead (CLI --width/--height or the GUI's fields), so someone can try it
+    // on their own specific hardware without it being forced on hardware where it might backfire.
+    if (cfg_.camera_width > 0 && cfg_.camera_height > 0) {
+        cap(capture_)->set(cv::CAP_PROP_FRAME_WIDTH, cfg_.camera_width);
+        cap(capture_)->set(cv::CAP_PROP_FRAME_HEIGHT, cfg_.camera_height);
+    }
     if (cfg_.log) {
+        // Always reports what the camera actually negotiated, not just what (if anything) was
+        // requested — a set() request can be silently ignored or remapped by the driver, so this
+        // is the only way to know what's really in effect.
         cfg_.log("[optical] camera opened: resolution " +
                   std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_WIDTH))) + "x" +
-                  std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_HEIGHT))));
+                  std::to_string(static_cast<int>(cap(capture_)->get(cv::CAP_PROP_FRAME_HEIGHT))) +
+                  (cfg_.camera_width > 0 && cfg_.camera_height > 0
+                       ? " (requested " + std::to_string(cfg_.camera_width) + "x" +
+                             std::to_string(cfg_.camera_height) + ")"
+                       : " (no resolution requested)"));
     }
+
+    capture_thread_ = new CaptureThread(cap(capture_));
 }
 
 OpticalLink::~OpticalLink() {
+    delete capture_thread(capture_thread_); // stops + joins the background thread first
     delete cap(capture_);
     delete det(detector_);
     cv::destroyWindow(out_window_name_);
@@ -150,28 +219,35 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
 
 bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) {
     using Clock = std::chrono::steady_clock;
-    auto ms_since = [](Clock::time_point t0) {
-        return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
-    };
+    auto* ct = capture_thread(capture_thread_);
 
     const auto deadline = Clock::now() + timeout;
     while (Clock::now() < deadline) {
-        const auto t_capture_start = Clock::now();
-        cv::Mat frame;
-        const bool got_frame = cap(capture_)->read(frame) && !frame.empty();
-        capture_ms_accum_ += ms_since(t_capture_start);
-        if (got_frame) {
-            // QR content is pure black/white — nothing downstream needs the camera's color
-            // channels. Converting once here (instead of leaving it to QRCodeDetector's own
-            // internal conversion on a full 3-channel frame every single call) and reusing the
-            // same grayscale Mat for the local preview too means only one conversion per captured
-            // frame, on a smaller image, in this hot polling loop.
-            cv::Mat gray;
-            if (frame.channels() > 1) {
-                cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-            } else {
-                gray = frame;
+        cv::Mat gray;
+        double capture_ms = 0.0;
+        bool got_new = false;
+        {
+            // Wait for the background CaptureThread to publish a frame we haven't seen yet, in
+            // short slices so the outer loop still gets to call cv::waitKey(1) regularly even
+            // during a dry spell (that call is what keeps this window's message queue serviced —
+            // see the comment below). cv::Mat's assignment here is a cheap, reference-counted
+            // shallow copy — safe to take under the lock and use after releasing it, since the
+            // capture thread replacing its own latest_gray afterwards doesn't touch the buffer our
+            // copy is still holding a reference to.
+            std::unique_lock<std::mutex> lock(ct->mtx);
+            const auto wait_until = std::min(deadline, Clock::now() + std::chrono::milliseconds(20));
+            ct->cv_ready.wait_until(lock, wait_until,
+                                     [&] { return ct->generation != last_seen_generation_ || ct->stop.load(); });
+            if (ct->generation != last_seen_generation_) {
+                gray = ct->latest_gray;
+                capture_ms = ct->last_capture_ms;
+                last_seen_generation_ = ct->generation;
+                got_new = true;
             }
+        }
+
+        if (got_new && !gray.empty()) {
+            capture_ms_accum_ += capture_ms;
             // Live camera preview in its own window — helps the user aim the camera, and never
             // touches out_window_name_, so it can't stomp on whatever we're currently displaying
             // to the other side. Throttled to every 3rd captured frame: it's a usability aid (aim
@@ -182,7 +258,7 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
             if (++preview_frame_counter_ % 3 == 0) cv::imshow(camera_window_name_, gray);
             const auto t_decode_start = Clock::now();
             const std::string decoded_text = det(detector_)->detectAndDecode(gray);
-            decode_ms_accum_ += ms_since(t_decode_start);
+            decode_ms_accum_ += std::chrono::duration<double, std::milli>(Clock::now() - t_decode_start).count();
             ++poll_count_since_last_decode_;
             if (!decoded_text.empty()) {
                 const uint32_t h = crc32(reinterpret_cast<const uint8_t*>(decoded_text.data()), decoded_text.size());

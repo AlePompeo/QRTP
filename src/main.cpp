@@ -30,11 +30,15 @@ void print_usage() {
         "      Full send+receive transfer over an in-process loopback channel, with optional\n"
         "      synthetic loss/corruption (P in [0,1]). No camera/monitor required.\n\n"
 #ifdef QRTP_WITH_OPENCV
-        "  qrtp send <file> [--camera N] [--fps F]\n"
+        "  qrtp send <file> [--camera N] [--fps F] [--width W --height H]\n"
         "      Send over the real optical link: renders QR frames to a window and reads\n"
-        "      ACKs/SACKs back from camera index N (the peer's screen must face this camera).\n\n"
-        "  qrtp receive --out <dir> [--camera N] [--fps F]\n"
-        "      Receive over the real optical link.\n");
+        "      ACKs/SACKs back from camera index N (the peer's screen must face this camera).\n"
+        "      --width/--height request a capture resolution from the camera — opt-in only\n"
+        "      (default: leave the camera's own default alone). Must give both together.\n"
+        "      Real hardware testing showed this can help one camera and hurt another, so try it\n"
+        "      on your own setup rather than assuming a value that worked elsewhere will too.\n\n"
+        "  qrtp receive --out <dir> [--camera N] [--fps F] [--width W --height H]\n"
+        "      Receive over the real optical link. Same --width/--height caveat as above.\n");
 #else
         "  qrtp send / qrtp receive\n"
         "      Not available in this build — rebuild with `make WITH_OPENCV=1` after\n"
@@ -124,6 +128,8 @@ int cmd_send_optical(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--camera" && i + 1 < argc) ocfg.camera_index = std::stoi(argv[++i]);
         else if (a == "--fps" && i + 1 < argc) ocfg.fps = std::stod(argv[++i]);
+        else if (a == "--width" && i + 1 < argc) ocfg.camera_width = std::stoi(argv[++i]);
+        else if (a == "--height" && i + 1 < argc) ocfg.camera_height = std::stoi(argv[++i]);
     }
     try {
         ocfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
@@ -147,6 +153,8 @@ int cmd_receive_optical(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--camera" && i + 1 < argc) ocfg.camera_index = std::stoi(argv[++i]);
         else if (a == "--fps" && i + 1 < argc) ocfg.fps = std::stod(argv[++i]);
+        else if (a == "--width" && i + 1 < argc) ocfg.camera_width = std::stoi(argv[++i]);
+        else if (a == "--height" && i + 1 < argc) ocfg.camera_height = std::stoi(argv[++i]);
         else if (a == "--out" && i + 1 < argc) out_dir = argv[++i];
     }
     try {

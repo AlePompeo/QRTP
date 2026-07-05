@@ -6,6 +6,67 @@ session.
 
 ## Resolved
 
+### General CPU/hardware optimization pass: unoptimized build discovered, capture/decode pipelined across threads, camera resolution made opt-in (2026-07-05)
+
+User asked for a broader sweep: anything else optimizable at the OpenCV/CPU/GPU/hardware level to
+minimize lag, now that rendering, grayscale conversion, and chunk size have each been addressed.
+Investigated systematically before changing anything:
+
+**1. This project's own build had zero compiler optimization the entire time.** `CMakeLists.txt`
+never set `CMAKE_BUILD_TYPE`, so every Windows build from v14 through v22 compiled with bare
+`-std=c++17` — no `-O2`/`-O3` at all. Checked whether OpenCV itself (where the actual decode
+bottleneck lives) had the same problem: it didn't — its own build tree has `CMAKE_BUILD_TYPE=Release`
+and `opencv_objdetect` (the module `cv::QRCodeDetector` lives in) compiles with
+`-O3 -DNDEBUG -msse3` confirmed directly from its `flags.make`. So this fix doesn't touch the
+confirmed decode bottleneck, but it's an unambiguous, zero-risk correctness gap regardless — fixed
+by defaulting `CMAKE_BUILD_TYPE` to `Release` when the invoker doesn't set one.
+
+**2. GPU/OpenCL — investigated, not pursued.** The bundled OpenCV does have `WITH_OPENCL=ON` /
+`HAVE_OPENCL=1` (T-API/UMat dispatch is available), but `cv::QRCodeDetector`'s finder-pattern
+search and decode are not known to have an OpenCL-accelerated path in this OpenCV version — passing
+it a `cv::UMat` would very likely just add a GPU-readback round-trip for no benefit, since the
+render (`cv::resize`) and grayscale conversion (`cv::cvtColor`) steps that *could* use it are
+already down to sub-millisecond cost and aren't where the time goes. Not implemented: no credible
+evidence it would help the actual bottleneck, only the confirmed-cheap steps.
+
+**3. A genuinely faster QR detector exists (`cv::wechat_qrcode`, OpenCV's contrib module) but was
+not pursued this pass** — it requires rebuilding OpenCV with an additional module plus shipping
+neural-net model files alongside the exe, meaningfully increasing both build complexity and the
+distributed package size, and cannot be verified from this dev environment (no camera at all).
+Left as a documented option for later if the pipelining below turns out not to be enough.
+
+**4. Capture and decode were sequential in the same thread — pipelined across two.** Real timing
+data showed `avg_capture_ms` (up to ~45ms) and `avg_decode_ms` (~10-90ms) as two comparable,
+*sequential* costs in `try_receive()`'s loop: capture, then decode, one full cycle at a time. Added
+a background `CaptureThread` (`optical_link.cpp`) that continuously runs `cap->read()` + the
+grayscale conversion on its own thread, publishing the latest frame (with a generation counter)
+behind a mutex/condition-variable; `try_receive()` now just picks up whatever's freshest instead of
+blocking on the camera read itself. On any multi-core CPU (virtually all modern hardware), this
+overlaps capture time behind decode time instead of paying both back-to-back, which should reduce
+the effective per-attempt cost toward `max(capture, decode)` rather than their sum.
+
+This is the highest-risk change in this entire optimization arc — it's the first one that touches
+threading in code with a hard-won debugging history specifically around HighGUI/Win32 window
+thread-affinity (see the v3 and v6 entries below). Mitigated deliberately: **every** `cv::imshow`/
+`cv::waitKey`/`cv::namedWindow` call still happens only on the thread that owns the `OpticalLink`
+(unchanged from before) — the new background thread *only* ever touches `cv::VideoCapture::read()`
+and `cv::cvtColor()`, neither of which is a windowing call with a thread-affinity requirement.
+`std::mutex`/`std::condition_variable` hand-off of a `cv::Mat` between threads relies on `cv::Mat`'s
+own reference-counted copy semantics (a shallow copy taken under the lock stays valid after the
+lock is released and the source is reassigned — standard, well-understood behavior, not something
+new being invented here). Verified: compiles cleanly (native + OpenCV-enabled Windows
+cross-compile), `make test` passes. **Not verified against a real camera** — no way to do that from
+this dev environment — so real hardware confirmation that this doesn't introduce a new freeze/crash
+is the outstanding item, on top of confirming the expected speedup.
+
+**5. Camera resolution made opt-in instead of automatic** (per explicit request): `OpticalLinkConfig`
+gained `camera_width`/`camera_height` (both 0 = default, don't touch the camera's own resolution).
+`qrtp send`/`qrtp receive` gained `--width`/`--height` CLI flags; the GUI gained a "Ris. (LxA)"
+field (blank = auto, or e.g. "1280x720"). Deliberately not defaulted to any specific value — the
+prior attempt at forcing one automatically for everyone backfired on one of the two test machines
+(see the entry above), so this is left as an explicit, per-machine, opt-in experiment rather than a
+default this software imposes.
+
 ### The forced 1280x720 camera resolution request helped one machine and hurt the other — reverted (2026-07-05)
 
 **Data** (real two-machine log, same transfer, both sides logging "camera opened"): the sending

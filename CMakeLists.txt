@@ -5,6 +5,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Was never set, so every prior Windows build (v14 through v22) compiled with no optimization
+# flags at all (bare -std=c++17) -- this project's own code (protocol/adaptive/optical_link/etc.),
+# not the separately-built OpenCV DLLs, which were already Release-optimized. Zero-risk to fix:
+# default to Release unless the invoker explicitly asked for something else.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
 option(WITH_OPENCV "Build the real screen+camera optical link (requires OpenCV)" OFF)
 
 set(QRTP_CORE_SOURCES
