@@ -309,3 +309,63 @@ the same GitHub release, replacing the broken build.
 provably eliminated at the binary level (no OpenEXR/Imath symbols exist to fail resolving anymore),
 but full runtime behavior (camera opens via `CAP_DSHOW`, GUI paints/responds correctly, QR
 detection actually decodes) is still pending real confirmation.
+
+## Real-hardware debugging saga, v3 through v12 (2026-07-05, same day) — first confirmed working transfers
+
+A long back-and-forth with the user actually running builds on real Windows hardware (two PCs,
+cameras facing each other's screens), each round shipping a fix and getting real log evidence back.
+Summarized here since `not_working.md` has the full per-bug detail:
+
+- **v3**: receive-mode camera window froze/crashed — `try_receive()` never pumped the HighGUI
+  message loop (`send()` got this for free via its own `waitKey`; `try_receive()` only slept).
+- **v4**: camera couldn't recognize *any* QR, ever — no `SetProcessDPIAware()`, so Windows display
+  scaling (125%/150%, standard on modern laptops) silently blurred everything drawn, QR included.
+  Also rendered the QR bigger/sharper (fills ~90% of screen, integer pixels-per-module).
+- **v5**: still zero recognition even after v4 — QRTP frames are dense binary full of embedded zero
+  bytes (a `SYN`'s `seq` field alone is 4 zero bytes), and `cv::QRCodeDetector`'s `std::string`
+  return isn't trustworthy with embedded NULs. Fixed by Base64-encoding frame bytes before
+  rendering (pure printable ASCII, sidesteps the question of decoder binary-safety entirely).
+- **v6**: handshake started working (a few retries) but the data phase never did — `Sender` and
+  `Receiver` both call `send()` *and* `try_receive()` on the same `OpticalLink`; a single shared
+  window meant `try_receive()`'s camera preview overwrote the outgoing QR within ~1ms of it being
+  shown. Split into two separate windows (outgoing-QR-only, camera-preview-only). Also dropped the
+  default fps 10→3 (100ms dwell was an aggressive assumption for real webcam focus/expose time).
+- **v7**: still failing at the AIMD's floor settings — turned out `adaptive_.ec_level()`/`fps()`
+  were correctly computed and logged, but never fed back into the actual `OpticalLink` doing the
+  rendering (`OpticalLinkConfig` was fixed at construction). Added `ILink::set_fps()`/
+  `set_ec_level()`, called before every send in the data phase.
+- **v8**: log the *first* real diagnostic build rather than another fix — added `OpticalLinkConfig`
+  log channel (QR shown/read, rejected frames, DATA frames accepted) since debugging blind had run
+  its course; every fix from here on is backed by real log evidence, not inference.
+- **v9**: diagnostics showed 3 of 4 offsets in a real transfer succeeding — the optical channel
+  genuinely works. The 4th kept failing because retransmitting a stuck offset always resends its
+  *original* (larger) payload, and raising EC level for the same payload size needs *more* QR
+  modules (more redundancy = more codewords), which at a fixed on-screen size means *smaller*,
+  harder-to-resolve modules — confirmed via logged module_px dropping 11→10→9 as EC climbed M→Q→H.
+  Fixed by splitting a stuck offset into pieces matching the current (smaller) adaptive chunk size
+  instead of resending it unchanged.
+- **v10**: first small-file transfer succeeded end-to-end! Large files appeared to freeze — the
+  GUI's log `EDIT` control never had `EM_LIMITTEXT` raised, silently capping at Win32's default
+  ~32K characters; the verbose v8 diagnostics hit that fast on a big transfer. Raised the limit,
+  added periodic trimming.
+- **v11**: a transfer completed (all bytes acked) but the receiver reported a hash mismatch — data
+  all arrived, content still wrong. The v9 splitting fix had a race: a stuck offset's first
+  sub-piece reuses the original's exact starting byte offset, so a stale/delayed camera capture of
+  the pre-split *original* (larger) frame arriving after the smaller replacement silently overwrote
+  correct data with no CRC to catch it (the stale frame is itself well-formed, just outdated).
+  Fixed by rejecting any DATA frame for an already-confirmed offset outright, and rejecting any
+  arrival *larger* than what's already stored at a not-yet-confirmed offset (re-chunking only ever
+  shrinks, so a larger latecomer is always stale).
+- **v12**: user confirmed full correctness *and* that their camera handles 60fps cleanly — real
+  evidence the old fps_max=15 ceiling (a guess) was leaving throughput on the table for large
+  files. Raised fps_max to 60, made fps growth on upshift multiplicative (matching chunk_size's
+  existing behavior) instead of a flat +1 (was ~57 individual upshift events to reach the old
+  ceiling, now ~12), roughly halved how long recovery from an isolated hiccup takes
+  (`fer_window` 8→4, `fer_low` 0.15→0.25, same "~1 bad in N" tolerance ratio), and lowered
+  `rto_min_ms` 150→50 so a fast/low-latency high-fps channel isn't artificially floored to a
+  slower retry timeout than it actually needs.
+
+**Net result**: correctness confirmed end-to-end by the user on real hardware (small and large
+files). Large-file *throughput* after the v12 tuning changes is not yet re-confirmed — first tuning
+pass based on real evidence (the user's own 60fps test) rather than a guess, but still pending a
+real large-file timing report before considering it settled.

@@ -60,7 +60,13 @@ void AdaptiveController::upshift() {
         ec_level_ = static_cast<ECLevel>(static_cast<uint8_t>(ec_level_) - 1);
     }
 
-    if (fps_ < cfg_.fps_max) fps_ = std::min(cfg_.fps_max, fps_ + 1.0);
+    // Multiplicative, matching chunk_size's growth and symmetric with downshift()'s fps_*0.8 —
+    // was a flat +1.0, which took ~57 individual upshift events to climb from a fps_initial of 3
+    // to the old fps_max of 15 (now 60), each gated behind re-qualifying with a clean streak. At
+    // a fixed +1 that's an eternity for a channel that's actually reliable; growing by a fraction
+    // of the current value ramps up fast early (when it matters most) while still tapering off
+    // smoothly near the ceiling.
+    if (fps_ < cfg_.fps_max) fps_ = std::min(cfg_.fps_max, fps_ * 1.25 + 0.5);
 }
 
 void AdaptiveController::downshift() {

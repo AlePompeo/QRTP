@@ -20,26 +20,32 @@ struct AdaptiveConfig {
 
     ECLevel ec_level_initial = ECLevel::M;
 
-    // A webcam needs meaningful dwell time on a QR to focus, expose, and let the decode algorithm
-    // lock on — 10fps (100ms/frame) proved too fast for real hardware to keep up with reliably;
-    // 3fps (~333ms/frame) is a much more conservative starting point.
+    // Start conservative (a webcam needs some dwell time on a QR to focus/expose/decode) and let
+    // the AIMD earn its way up from here — but real hardware testing showed 60fps working
+    // perfectly once the channel is good, far above the old fps_max=15 ceiling that was capping
+    // large-file throughput for no real reason. fps_initial stays low/safe for cameras that can't
+    // keep up; fps_max now reflects what's actually achievable, not a guess.
     double fps_initial = 3.0;
     double fps_min = 1.0;
-    double fps_max = 15.0;
+    double fps_max = 60.0;
 
     double rto_initial_ms = 500.0;
-    double rto_min_ms = 150.0;
+    // Was 150ms, which artificially floored the retransmit timeout well above what a fast, low-
+    // latency high-fps channel actually needs — at 60fps a full round trip can complete in well
+    // under 150ms, so a lost frame sat waiting for a timeout far longer than necessary. Let the
+    // Jacobson/Karels estimate (rto_ms_ = srtt + 4*rttvar) actually reflect a fast channel instead
+    // of being clamped up.
+    double rto_min_ms = 50.0;
 
-    // Rolling frame-error-rate at/below which we upshift. Must stay realistic relative to
-    // fer_window: with a window of 8, a threshold like 0.01 effectively demands a *perfect*
-    // 8-in-a-row clean streak (since even a single failure gives 1/8 = 0.125 > 0.01), which on
-    // any channel with double-digit-percent noise has such a low probability of ever occurring
-    // that the controller pins itself at the floor and never recovers — observed directly with
-    // 5% loss + 3% corruption (~15% effective per-round failure once you count both the DATA
-    // frame and its ACK needing to survive), which stayed stuck for 90+ seconds transferring 20KB
-    // at fer_low=0.01. 0.15 means "at most ~1 bad round out of 8" is still good enough to upshift.
-    double fer_low = 0.15;
-    size_t fer_window = 8; // how many recent rounds the rolling FER is computed over
+    // Rolling frame-error-rate at/below which we upshift, and how many recent rounds it's computed
+    // over. Was fer_window=8/fer_low=0.15 ("at most ~1 bad round out of 8") — correct in spirit,
+    // but recovering from any single isolated hiccup then required re-earning a fresh 8-round clean
+    // streak from scratch before the *next* upshift could fire, which on a large file with
+    // occasional isolated blips (not sustained loss) spent a lot of time re-proving reliability
+    // instead of transferring. fer_window=4/fer_low=0.25 keeps the same "~1 bad in N" tolerance
+    // ratio but halves how long each recovery takes to re-qualify.
+    double fer_low = 0.25;
+    size_t fer_window = 4;
 };
 
 // AIMD controller: reuses TCP congestion-control intuition, re-targeted at an optical channel.
