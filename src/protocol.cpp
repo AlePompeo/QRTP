@@ -159,6 +159,7 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
     ack.ack_window = std::min<uint32_t>(syn_ack.ack_window, static_cast<uint32_t>(adaptive_.window_size()));
     link_.send(encode_frame(ack));
     log("ACK sent, connection established");
+    const auto transfer_start = Clock::now();
 
     // --- Data phase: selective-repeat sliding window, keyed by byte offset ---
     struct InFlight {
@@ -313,6 +314,9 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
     if (!got_fin_ack) return {false, "teardown failed: no FIN_ACK received"};
 
     const bool receiver_ok = (fin_ack.flags_byte & flags::LAST_FRAME) != 0;
+    const double elapsed_s =
+        std::chrono::duration_cast<std::chrono::duration<double>>(Clock::now() - transfer_start).count();
+    log("transfer finished: " + std::to_string(filesize) + " bytes in " + std::to_string(elapsed_s) + "s");
     return {receiver_ok,
             receiver_ok ? "transfer complete, hash verified by receiver" : "receiver reported a hash mismatch"};
 }
@@ -350,6 +354,7 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
     }
     if (!got_syn) return std::nullopt;
     log("SYN received: " + meta_out.filename + " (" + std::to_string(meta_out.filesize) + " bytes)");
+    const auto transfer_start = Clock::now();
 
     link_.set_fps(adaptive_.fps());
     link_.set_ec_level(adaptive_.ec_level());
@@ -476,7 +481,10 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
 
     const auto digest = sha256(full.data(), full.size());
     const bool ok = digest == meta_out.sha256;
-    log(ok ? "hash verified" : "HASH MISMATCH");
+    const double elapsed_s =
+        std::chrono::duration_cast<std::chrono::duration<double>>(Clock::now() - transfer_start).count();
+    log(std::string(ok ? "hash verified" : "HASH MISMATCH") + " -- transfer finished: " +
+        std::to_string(full.size()) + " bytes in " + std::to_string(elapsed_s) + "s");
 
     Frame fin_ack;
     fin_ack.type = FrameType::FIN_ACK;
