@@ -172,6 +172,11 @@ private:
     std::vector<uint8_t> last_decoded_hash_;
     int screen_w_ = 1000;
     int screen_h_ = 1000;
+    void* out_canvas_ = nullptr; // cv::Mat*, persistent full-screen canvas reused by send()/
+                                 // flush_send_batch() (see show_padded in optical_link.cpp) instead
+                                 // of allocating and white-filling a new one every displayed frame
+    int last_content_w_ = 0;     // previous frame's centered content size — show_padded only
+    int last_content_h_ = 0;     // re-fills white when this actually changes
     int preview_frame_counter_ = 0; // throttles the local camera-preview imshow (see try_receive)
 
     // Accumulated since the last successful decode, so the "camera read a NEW QR" log line can

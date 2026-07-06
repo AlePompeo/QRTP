@@ -29,6 +29,7 @@ cv::QRCodeDetector* det(void* p) { return reinterpret_cast<cv::QRCodeDetector*>(
 cv::wechat_qrcode::WeChatQRCode* wechat_det(void* p) {
     return reinterpret_cast<cv::wechat_qrcode::WeChatQRCode*>(p);
 }
+cv::Mat* screen_canvas(void* p) { return reinterpret_cast<cv::Mat*>(p); }
 
 // Resolves OpticalLinkConfig::wechat_qrcode_model_dir when left empty: a "models/wechat_qrcode"
 // folder next to the running executable, the same "next to the .exe" convention already used for
@@ -73,22 +74,36 @@ cv::Mat downscale_for_decode(const cv::Mat& gray) {
     return small;
 }
 
-// Centers `img` on a canvas exactly the display's screen resolution (or larger, only in the rare
-// case img itself is already bigger — never crops). This is what lets out_window_name_ stay fixed
-// at the full screen size for the entire session (see the ctor) instead of being resized/moved to
-// match whatever the current QR happens to render at: every frame becomes a single 1:1 pixel copy
-// into a same-sized canvas, so the window never has to stretch the image itself (stretching a
-// non-matching aspect ratio would distort the QR's square modules, exactly what a decoder can't
-// tolerate) and never has to move/resize on screen, which would otherwise happen every time the
-// AIMD controller changes QR version mid-transfer.
-cv::Mat pad_to_screen(const cv::Mat& img, int screen_w, int screen_h) {
+// Centers `img` on `persistent_canvas`, a canvas exactly the display's screen resolution (or
+// larger, only in the rare case img itself is already bigger — never crops), reused across calls
+// instead of being reallocated every frame. This is what lets out_window_name_ stay fixed at the
+// full screen size for the entire session (see the ctor) instead of being resized/moved to match
+// whatever the current QR happens to render at: every frame becomes a single 1:1 pixel copy into a
+// same-sized canvas, so the window never has to stretch the image itself (stretching a non-matching
+// aspect ratio would distort the QR's square modules, exactly what a decoder can't tolerate) and
+// never has to move/resize on screen, which would otherwise happen every time the AIMD controller
+// changes QR version mid-transfer.
+//
+// `last_w`/`last_h` (the caller's own previous-content-size memory, not read from the canvas
+// itself) let this skip the white-fill entirely on the common case of consecutive frames at the
+// same rendered size — only reallocating/re-filling when the canvas itself needs to grow, or when
+// `img`'s size actually changed since the last call (a smaller new image would otherwise leave the
+// previous, larger one's pixels lingering outside the new centered rect).
+void show_padded(cv::Mat& persistent_canvas, int& last_w, int& last_h, int screen_w, int screen_h,
+                  const cv::Mat& img) {
     const int canvas_w = std::max(screen_w, img.cols);
     const int canvas_h = std::max(screen_h, img.rows);
-    cv::Mat canvas(canvas_h, canvas_w, img.type(), cv::Scalar(255));
+    if (persistent_canvas.empty() || persistent_canvas.cols != canvas_w || persistent_canvas.rows != canvas_h) {
+        persistent_canvas = cv::Mat(canvas_h, canvas_w, img.type(), cv::Scalar(255));
+        last_w = last_h = -1; // force the copyTo below to be the only content on a fresh canvas
+    } else if (img.cols != last_w || img.rows != last_h) {
+        persistent_canvas.setTo(cv::Scalar(255));
+    }
     const int off_x = (canvas_w - img.cols) / 2;
     const int off_y = (canvas_h - img.rows) / 2;
-    img.copyTo(canvas(cv::Rect(off_x, off_y, img.cols, img.rows)));
-    return canvas;
+    img.copyTo(persistent_canvas(cv::Rect(off_x, off_y, img.cols, img.rows)));
+    last_w = img.cols;
+    last_h = img.rows;
 }
 
 // Captures frames continuously in the background so try_receive() never has to block on
@@ -98,6 +113,7 @@ cv::Mat pad_to_screen(const cv::Mat& img, int screen_w, int screen_h) {
 // the windows (see optical_link.hpp's class comment on why this matters on Windows).
 struct CaptureThread {
     cv::VideoCapture* capture;
+    std::function<void(const std::string&)> log;
     std::mutex mtx;
     std::condition_variable cv_ready;
     cv::Mat latest_gray;
@@ -106,7 +122,8 @@ struct CaptureThread {
     std::atomic<bool> stop{false};
     std::thread worker;
 
-    explicit CaptureThread(cv::VideoCapture* c) : capture(c) {
+    CaptureThread(cv::VideoCapture* c, std::function<void(const std::string&)> log_fn)
+        : capture(c), log(std::move(log_fn)) {
         worker = std::thread([this] { run(); });
     }
 
@@ -124,12 +141,26 @@ struct CaptureThread {
         // often the OS scheduler lets something less time-sensitive delay a capture in progress.
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
+        int consecutive_failures = 0;
         while (!stop.load()) {
             const auto t0 = Clock::now();
             cv::Mat frame;
             const bool ok = capture->read(frame) && !frame.empty();
             const double capture_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
-            if (!ok) continue; // camera hiccup — cap->read() already paces this, just retry
+            if (!ok) {
+                // cap->read() normally paces this loop by blocking until the next frame — but if
+                // the camera disconnects or its driver wedges, some backends return false
+                // immediately instead of blocking, which without a backoff here would spin this
+                // thread at ~100% of a CPU core indefinitely with no signal anything is wrong. Logs
+                // once per sustained failure streak (not every iteration, which would just spam).
+                if (++consecutive_failures == 30 && log) {
+                    log("[optical] camera has not produced a frame in a while (disconnected, or "
+                        "driver/USB stalled?)");
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+            consecutive_failures = 0;
 
             cv::Mat gray;
             if (frame.channels() > 1) {
@@ -182,11 +213,12 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
     // fullscreen (WND_PROP_FULLSCREEN), which hands display/compositor control away from the
     // window manager and can fight with alt-tab or a second monitor; this stays an ordinary,
     // decorated WINDOW_NORMAL window that simply happens to be sized to cover the whole screen.
-    // send()/flush_send_batch() pad every frame onto a same-sized canvas (see pad_to_screen above)
-    // instead of resizing this window to match the QR's own size, so it never needs to move or
-    // resize again after this.
+    // send()/flush_send_batch() pad every frame onto a same-sized persistent canvas (see
+    // show_padded above) instead of resizing this window to match the QR's own size, so it never
+    // needs to move or resize again after this.
     cv::resizeWindow(out_window_name_, screen_w_, screen_h_);
     cv::moveWindow(out_window_name_, 0, 0);
+    out_canvas_ = new cv::Mat(); // lazily sized to the screen on the first show_padded() call
     // Keeps the QR visible even if the user clicks into another window mid-transfer — the whole
     // point of this window is that a camera on the other machine has to be able to read it
     // continuously, so it must never end up hidden behind something else.
@@ -332,7 +364,7 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
                        : " (contrast left at default)"));
     }
 
-    capture_thread_ = new CaptureThread(cap(capture_));
+    capture_thread_ = new CaptureThread(cap(capture_), cfg_.log);
 }
 
 OpticalLink::~OpticalLink() {
@@ -340,6 +372,7 @@ OpticalLink::~OpticalLink() {
     delete cap(capture_);
     delete det(detector_);
     delete wechat_det(wechat_detector_);
+    delete screen_canvas(out_canvas_);
     cv::destroyWindow(out_window_name_);
     cv::destroyWindow(camera_window_name_);
 }
@@ -402,10 +435,12 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     // screen exactly as-is — for as long as it takes the other side to read it, not just for this
     // call's brief waitKey — until the next real send() replaces it. try_receive()'s camera-preview
     // updates happen in a completely separate window, so they can never race with this. Padded onto
-    // a full-screen canvas (see pad_to_screen) since the window itself is fixed at screen_w_ x
-    // screen_h_ for the whole session — this frame's QR can be a different size than the last
-    // (AIMD-driven) without ever needing to move or resize the window.
-    cv::imshow(out_window_name_, pad_to_screen(img, screen_w_, screen_h_));
+    // the persistent full-screen canvas (see show_padded) since the window itself is fixed at
+    // screen_w_ x screen_h_ for the whole session — this frame's QR can be a different size than
+    // the last (AIMD-driven) without ever needing to move or resize the window, or re-filling the
+    // whole canvas white unless that size actually changed.
+    show_padded(*screen_canvas(out_canvas_), last_content_w_, last_content_h_, screen_w_, screen_h_, img);
+    cv::imshow(out_window_name_, *screen_canvas(out_canvas_));
     if (cfg_.log) {
         cfg_.log("[optical] showing QR: version=" + std::to_string(qr.version) + " modules=" +
                   std::to_string(qr.width) + "x" + std::to_string(qr.width) + " module_px=" +
@@ -572,9 +607,11 @@ void OpticalLink::flush_send_batch() {
         one.copyTo(canvas(cv::Rect(off_x, off_y, sides[i], sides[i])));
     }
 
-    // Same fixed full-screen window as the classic path (see send()) — pad this grid onto a
-    // screen_w_ x screen_h_ canvas instead of resizing/moving the window to match it.
-    cv::imshow(out_window_name_, pad_to_screen(canvas, screen_w_, screen_h_));
+    // Same fixed full-screen window and persistent canvas as the classic path (see send()) — pad
+    // this grid onto it instead of resizing/moving the window, or reallocating/re-filling a new
+    // canvas, to match it.
+    show_padded(*screen_canvas(out_canvas_), last_content_w_, last_content_h_, screen_w_, screen_h_, canvas);
+    cv::imshow(out_window_name_, *screen_canvas(out_canvas_));
     if (cfg_.log) {
         cfg_.log("[optical] showing " + std::to_string(n) + " QR(s) in a " + std::to_string(cols) + "x" +
                   std::to_string(rows) + " grid, max_module_px=" + std::to_string(max_scale));

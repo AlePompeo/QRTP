@@ -489,3 +489,62 @@ for resolution/fourcc.
 (`qrtp.exe`/`qrtp_gui.exe`/`qrtp_tests.exe`), `dist-windows.zip` refreshed. **Not yet verified on
 real hardware** — same standing caveat as every other change to the optical layer in this log; no
 camera/monitor available in this dev environment.
+
+## Software optimization/reliability pass: O(n²) SACK generation, camera busy-loop, canvas reuse (2026-07-06)
+
+User asked to check for GPU offload opportunities first (see `not_working.md`, 2026-07-06 entry —
+investigated, not pursued: no accessible hook in `WeChatQRCode`'s public API, and both its models
+are too small relative to per-frame call rate for GPU dispatch overhead to plausibly pay off), then
+asked for a broader sweep of software-level speed/reliability optimizations. Read through
+`protocol.cpp`, `adaptive.cpp`, `framing.cpp`, `link.cpp`, `qr_encoder.cpp`, `base64.cpp`, and
+`optical_link.cpp` looking specifically for algorithmic inefficiencies and reliability gaps not
+already covered elsewhere in this log. Found five candidates, presented all with an impact/effort
+read before touching anything; three were selected to implement:
+
+**1. `Receiver::receive_file`'s `send_sack()` was O(n²) over a transfer's chunk count
+(`protocol.cpp`).** `chunks` (the receiver's byte-offset-keyed reassembly buffer) accumulates every
+chunk ever received for the whole file and is never pruned — necessary, since the final reassembly
+loop needs all of it. But `send_sack()`'s range-building loop scanned this *entire* map from
+`begin()` on every single call, skipping only entries at-or-before `cumulative` via an `if` check —
+and with the default `sack_every_n_frames=1`, `send_sack()` runs once per DATA frame received. For a
+10MB file at a ~1KB average chunk size (~10,000 chunks), that's on the order of tens of millions of
+map-entry visits by the end of the transfer; for 100MB, billions — squarely the "large file"
+scenario this project has repeatedly hit real bugs and slowness on (see the hash-mismatch entry
+above, and the several large-file entries in `not_working.md`). Fix: since `chunks` is a
+`std::map` ordered by offset, every entry that could possibly satisfy `off > cumulative` lies
+strictly after `chunks.upper_bound(cumulative)` — so the loop now starts there instead of at
+`begin()`, visiting only entries actually ahead of the cumulative point (bounded by how many
+out-of-order chunks are currently buffered, not by the whole transfer's history). Identical output,
+zero behavior change — verified with `make test` and a real 3MB loopback `demo` run (5%
+loss/2% corruption, hash verified) at native speed, no camera/hardware needed for this one.
+
+**2. `CaptureThread::run()` could busy-loop indefinitely on camera failure
+(`optical_link.cpp`).** The comment on the old `if (!ok) continue;` assumed `cap->read()` itself
+paces this loop by blocking until the next frame — true in the common case, but if the camera
+disconnects or its driver wedges, some backends return `false` immediately instead of blocking,
+which would spin this background thread at ~100% of a CPU core indefinitely with no log or signal
+anything was wrong. Fix: a brief `5ms` sleep on failure, plus a one-time log line once 30
+consecutive reads have failed (a sustained streak, not a single hiccup) — `CaptureThread` now takes
+the same log callback `OpticalLinkConfig::log` already uses elsewhere.
+
+**3. `send()`/`flush_send_batch()` reallocated and fully white-filled a full-screen-sized canvas on
+every displayed frame (`optical_link.cpp`)** — a cost introduced by the same-day full-screen-window
+change above, since the previous per-QR-sized-window approach never needed a separate padding
+canvas at all. Replaced the free `pad_to_screen()` function with a stateful `show_padded()`: the
+canvas (`OpticalLink::out_canvas_`) is now a persistent member, allocated once, and only re-filled
+white when the centered content's own size actually changes (an AIMD-driven event — a QR version
+change — far less frequent than every single frame). Consecutive frames at the same rendered size
+now skip the fill entirely and go straight to the one unavoidable `copyTo`.
+
+Two further candidates were surfaced but **not** implemented this pass (lower priority, left for
+later if revisited): moving `Frame::payload` into the `Sender`'s `inflight` map entry instead of
+copying it (payload isn't read again after `encode_frame()`), and raising the SACK range cap
+(`kMaxEntries = 32` in `protocol.cpp`) to match `AdaptiveConfig::window_max` (64), since a fully-grown
+window with heavy front-of-window loss could buffer more out-of-order chunks than the cap reports
+in one SACK (redundant retransmits, not data loss, in that case).
+
+**Verified**: `make test` (native), a 3MB randomized loopback `demo` transfer (5% loss/2%
+corruption, hash verified) exercising #1 directly, and a full MinGW cross-compile rebuild with zero
+warnings (`qrtp.exe`/`qrtp_gui.exe`/`qrtp_tests.exe`), `dist-windows.zip` refreshed. **#2 and #3 not
+verified on real camera hardware** — same standing caveat as every other optical-layer change in
+this log.

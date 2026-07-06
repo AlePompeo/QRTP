@@ -386,8 +386,17 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
 
     auto send_sack = [&] {
         std::vector<std::pair<uint64_t, uint32_t>> ranges;
-        for (const auto& [off, bytes] : chunks) {
-            if (off > cumulative) ranges.emplace_back(off, static_cast<uint32_t>(bytes.size()));
+        // `chunks` accumulates every chunk ever received for the whole file (never erased — the
+        // final reassembly loop needs all of it), so scanning it from begin() here made send_sack()
+        // (called once per DATA frame by default: sack_every_n_frames=1) cost O(chunks received so
+        // far) on every single call — O(n^2) total over a transfer of n chunks, and the dominant
+        // real cost on large files specifically (thousands to tens of thousands of chunks). Every
+        // entry at or before `cumulative` is already covered by the cumulative ACK below and would
+        // just be skipped by the old `if`; `chunks` is a std::map (ordered by offset), so
+        // upper_bound(cumulative) jumps straight to the first entry that could possibly qualify —
+        // same output, O(entries actually ahead of cumulative) instead of O(entire history).
+        for (auto it = chunks.upper_bound(cumulative); it != chunks.end(); ++it) {
+            ranges.emplace_back(it->first, static_cast<uint32_t>(it->second.size()));
         }
         Frame f;
         f.type = FrameType::SACK;
