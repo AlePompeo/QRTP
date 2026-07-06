@@ -926,3 +926,45 @@ remains unverified beyond the MinGW toolchain's default PE subsystem version (5.
 cross-compile-toolchain default, not a deliberate or tested minimum)** and one historical
 crash-then-fixed real-hardware attempt on an unrecorded Windows version — genuinely confirming
 Windows backward-compatibility would need real hardware this dev environment doesn't have.
+
+## Set an honest, deliberate Windows API baseline (Windows 7) instead of the toolchain's accidental default (2026-07-06, same day)
+
+Follow-up to the compatibility entry above: asked whether Windows could be made backward-compatible
+"regardless," given no real Windows machine to test on. Two things checked:
+
+1. **CPU instruction set**: no `-march`/`-mtune` set anywhere — `x86_64-w64-mingw32-g++`'s own
+   default target is already the generic `x86-64` baseline (`-mtune=generic`), so hardware
+   backward-compatibility was already fine, nothing to change there.
+2. **Windows API version baseline**: genuinely inconsistent. `x86_64-w64-mingw32-g++ -E -dM` on
+   `<sdkddkver.h>` showed the *unset* default resolves to `_WIN32_WINNT_WS03` (Windows Server
+   2003 / XP x64) — but `main.cpp`/`gui_win32.cpp` already call `SetProcessDPIAware()`
+   unconditionally, a Vista-only API. This compiled without complaint (mingw-w64's headers don't
+   gate declarations behind `_WIN32_WINNT` as strictly as the official Windows SDK does), silently
+   relying on that leniency rather than declaring the real requirement — and a binary built this
+   way would still *fail to launch at all* on genuinely pre-Vista Windows (a missing import in a
+   statically-linked DLL call is a load-time failure, independent of whatever the PE header's own
+   declared subsystem version claims — confirmed still showing the old 5.2/XP-x64 default via
+   `objdump -p` even with real Vista-only APIs already in use).
+
+**Fixed in `cmake/toolchain-mingw64.cmake`**: set `_WIN32_WINNT`/`WINVER` to `0x0601` (Windows 7)
+explicitly — grepped the whole source tree first for any Windows 8/10-only API
+(`SetProcessDpiAwarenessContext`, `IFileDialog`, etc.) to confirm nothing already needs *more*
+than this baseline; nothing did. Also added `--major-subsystem-version`/`--minor-subsystem-version`/
+`--major-os-version`/`--minor-os-version` linker flags (`6`/`1`) so the PE header's own declared
+minimum actually matches reality now, instead of the misleading inherited-XP-x64 default —
+confirmed via `objdump -p qrtp_gui.exe` now showing `MajorSubsystemVersion 6` / `MinorSubsystemVersion
+1`. Windows 7 chosen as the new floor specifically because it's the *honest* minimum given what
+the code already does (comfortably past Vista), not a new capability being added — this is a
+declared-metadata correctness fix, not a behavior change.
+
+**Also identified, not yet actioned**: `wine`/`wine-core` are available via `dnf` (not installed
+in this dev environment) — installing it would let `qrtp.exe`/`qrtp_gui.exe` actually be *executed*
+for the first time in this project's entire history (every prior "verified" claim for Windows has
+meant "compiles and links via MinGW," never "runs"), the same kind of upgrade in confidence the
+per-distro Linux container builds just gave Linux. Recorded as the natural next step if genuine
+Windows execution evidence (not just compile evidence) is wanted.
+
+**Verified**: full clean MinGW cross-compile rebuild with the new toolchain flags, zero warnings,
+`dist-windows.zip` refreshed. **Still not run on real Windows, or under Wine** — the toolchain-level
+fix is a real, verifiable-by-inspection correctness improvement (the PE header now honestly
+reflects the code's actual API floor), but doesn't by itself constitute execution evidence.

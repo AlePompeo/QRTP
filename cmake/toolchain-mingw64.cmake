@@ -25,3 +25,21 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 # Statically link the MinGW runtime (libgcc/libstdc++/libwinpthread) so the resulting .exe needs
 # fewer accompanying DLLs to run on a plain Windows machine.
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++ -static -lwinpthread")
+
+# Explicit Windows API baseline (2026-07-06). Left unset, mingw-w64's headers default to
+# _WIN32_WINNT_WS03 (Windows Server 2003 / XP x64) -- but this project already calls at least one
+# Vista-only API unconditionally (SetProcessDPIAware, in main.cpp/gui_win32.cpp), so the real
+# floor was already Vista+; mingw-w64 just doesn't gate declarations behind _WIN32_WINNT as
+# strictly as the official Windows SDK does, so this compiled without complaint while silently
+# relying on that leniency rather than declaring the actual requirement. A binary built against
+# the old default would still fail to *launch* at all on genuinely pre-Vista Windows (a missing
+# import in a statically-linked DLL call is a load-time failure, regardless of what the PE
+# header's declared subsystem version claims) -- Windows 7 (0x0601) is the honest, deliberate
+# minimum from here on: comfortably past Vista, broad enough for any realistic target today.
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_WIN32_WINNT=0x0601 -DWINVER=0x0601")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_WIN32_WINNT=0x0601 -DWINVER=0x0601")
+# _WIN32_WINNT/WINVER above only govern which API *declarations* the headers expose -- the PE
+# header's own declared minimum OS version is a separate linker-level field (was 5.02, the
+# mingw-w64 default, i.e. Windows XP x64/Server 2003) that doesn't move on its own. Set it to
+# match: 6.1 = Windows 7, consistent with the floor set above.
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--major-subsystem-version,6 -Wl,--minor-subsystem-version,1 -Wl,--major-os-version,6 -Wl,--minor-os-version,1")
