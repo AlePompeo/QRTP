@@ -448,3 +448,44 @@ numbers are roughly comparable (excludes handshake-retry variance, which can dif
 the two ends on a real optical link). Verified via `make test` and a real `demo` run (5% loss/3%
 corruption): both sender and receiver logged matching sizes and elapsed times
 (`50000 bytes in 0.286s`, sender and receiver agreeing to within ~1ms).
+
+## QR window pinned topmost + full-screen sized; camera contrast/saturation boost (2026-07-06)
+
+User asked for two things on the send side: the QR display window should always stay on top and
+automatically fill the screen's full resolution without going into OS-level exclusive fullscreen,
+and the camera should be tuned (contrast or other properties) to improve QR readability
+specifically.
+
+**Window (`optical_link.cpp`, `optical_link.hpp`):** `out_window_name_` previously resized/moved
+itself on every `send()`/`flush_send_batch()` call to match whatever size the current QR happened
+to render at (~90% of the shorter screen dimension) — so it visibly moved every time the AIMD
+controller changed QR version mid-transfer, and had no protection against ending up hidden behind
+another window. It's now fixed at `screen_w_ x screen_h_`, positioned at `(0,0)`, for the entire
+session, and pinned with `cv::setWindowProperty(..., cv::WND_PROP_TOPMOST, 1)` — confirmed present
+in the vendored OpenCV 4.11.0 headers used for the MinGW cross-compile
+(`WND_PROP_TOPMOST = 5, "property to toggle normal window being topmost or not"`). Still an
+ordinary decorated `WINDOW_NORMAL` window, not `WND_PROP_FULLSCREEN` (exclusive fullscreen hands
+display/compositor control away from the window manager and can fight with alt-tab or a second
+monitor — explicitly what the user asked to avoid). Added `pad_to_screen()`, a small helper that
+centers the rendered QR (or QR grid) onto a same-sized white canvas before `imshow`, so every
+frame stays a 1:1 pixel copy — no stretch-blur of the QR's square modules — and the window itself
+never needs to resize/move again after construction. Removed `last_window_side_` (the field that
+tracked the old per-frame resize logic), now unused.
+
+**Camera contrast (`OpticalLinkConfig::enhance_camera_contrast`, default on):** requests a
+deliberately oversized `CAP_PROP_CONTRAST` value (driver clamps to its real max — the same
+technique already used for `camera_width`/`camera_height`) and `CAP_PROP_SATURATION = 0` right
+after opening the camera. Targets the common real-world failure mode of a washed-out, low-contrast
+capture (dim monitor backlight, glare, ambient light) blurring the boundary between a QR module
+and its quiet zone; saturation to 0 is unconditionally safe since a QR code is pure black/white, so
+color is never useful decoder input, only a possible source of chroma noise ahead of the grayscale
+conversion `CaptureThread::run()` already does. Exposed as a per-machine runtime toggle — GUI
+checkbox "Migliora contrasto fotocamera" (checked by default) and CLI `--no-contrast-boost` — same
+pattern as `request_mjpeg`/`disable_autofocus`/`use_wechat_qrcode`. The "camera opened: ..." log
+line now also reports the actually-negotiated contrast/saturation values, same as it already does
+for resolution/fourcc.
+
+**Verified**: `make test` (native, all checks pass) and a full MinGW cross-compile rebuild
+(`qrtp.exe`/`qrtp_gui.exe`/`qrtp_tests.exe`), `dist-windows.zip` refreshed. **Not yet verified on
+real hardware** — same standing caveat as every other change to the optical layer in this log; no
+camera/monitor available in this dev environment.
