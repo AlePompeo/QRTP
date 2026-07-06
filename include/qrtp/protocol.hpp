@@ -1,5 +1,4 @@
 #pragma once
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -15,11 +14,8 @@
 
 namespace qrtp {
 
-struct TransferMetadata {
-    std::string filename;
-    uint64_t filesize = 0;
-    std::array<uint8_t, 32> sha256{};
-};
+// TransferMetadata now lives in framing.hpp (qrtp::TransferMetadata) — shared with
+// broadcast.hpp/broadcast.cpp, which needs the identical filename/filesize/sha256 shape.
 
 struct ProtocolConfig {
     AdaptiveConfig adaptive;

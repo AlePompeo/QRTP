@@ -10,6 +10,7 @@
 
 #include "qrtp/adaptive.hpp"
 #include "qrtp/base64.hpp"
+#include "qrtp/broadcast.hpp"
 #include "qrtp/crc32.hpp"
 #include "qrtp/framing.hpp"
 #include "qrtp/link.hpp"
@@ -240,6 +241,52 @@ void test_cancellation() {
     waiter_b.join();
 }
 
+void test_broadcast_transfer() {
+    // No ARQ/retransmission in this mode — reliability comes entirely from BroadcastSender looping
+    // the whole file a bounded number of times, so a chunk lost/corrupted in one loop still has
+    // other chances to get through before the sender gives up.
+    std::vector<uint8_t> content;
+    content.reserve(5000);
+    std::mt19937 rng(99);
+    for (int i = 0; i < 5000; ++i) content.push_back(static_cast<uint8_t>(rng() & 0xFF));
+
+    const std::string path = "/tmp/qrtp_selftest_broadcast_input.bin";
+    {
+        std::ofstream f(path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(content.data()), static_cast<std::streamsize>(content.size()));
+    }
+
+    qrtp::LoopbackConfig lcfg;
+    lcfg.loss_probability = 0.05;
+    lcfg.corruption_probability = 0.02;
+    lcfg.latency = std::chrono::milliseconds(1);
+    lcfg.seed = 11;
+    auto link_pair = qrtp::LoopbackLink::make_pair(lcfg);
+
+    qrtp::BroadcastConfig bcfg;
+    bcfg.loops = 5; // bounded — enough margin over a ~7% per-loop per-chunk failure rate that no
+                     // chunk should plausibly miss all 5 tries, without looping forever if it does
+    qrtp::BroadcastResult result;
+    qrtp::TransferMetadata meta;
+    std::optional<std::vector<uint8_t>> received;
+
+    std::thread sender_thread([&] {
+        qrtp::BroadcastSender sender(*link_pair.first, bcfg);
+        result = sender.send_file(path);
+    });
+    std::thread receiver_thread([&] {
+        qrtp::BroadcastReceiver receiver(*link_pair.second, bcfg);
+        received = receiver.receive_file(meta, std::chrono::milliseconds(15000));
+    });
+    sender_thread.join();
+    receiver_thread.join();
+
+    CHECK(result.success);
+    CHECK(received.has_value());
+    if (received) CHECK(*received == content);
+    CHECK(meta.filesize == content.size());
+}
+
 int main() {
     test_crc32();
     test_base64();
@@ -249,6 +296,7 @@ int main() {
     test_qr_encoder();
     test_end_to_end_transfer();
     test_cancellation();
+    test_broadcast_transfer();
 
     std::printf("\n%s (%d failing check%s)\n", g_failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED", g_failures,
                 g_failures == 1 ? "" : "s");

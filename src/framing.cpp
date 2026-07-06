@@ -1,5 +1,7 @@
 #include "qrtp/framing.hpp"
 
+#include <algorithm>
+
 #include "qrtp/crc32.hpp"
 
 namespace qrtp {
@@ -17,10 +19,20 @@ void put_u32(std::vector<uint8_t>& b, uint32_t v) {
     b.push_back(uint8_t(v));
 }
 
+void put_u64(std::vector<uint8_t>& b, uint64_t v) {
+    for (int i = 7; i >= 0; --i) b.push_back(uint8_t(v >> (i * 8)));
+}
+
 uint16_t get_u16(const uint8_t* p) { return uint16_t((uint16_t(p[0]) << 8) | p[1]); }
 
 uint32_t get_u32(const uint8_t* p) {
     return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+}
+
+uint64_t get_u64(const uint8_t* p) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v = (v << 8) | p[i];
+    return v;
 }
 
 } // namespace
@@ -62,6 +74,28 @@ std::optional<Frame> decode_frame(const std::vector<uint8_t>& bytes) {
     f.flags_byte = bytes[12];
     f.payload.assign(bytes.begin() + kHeaderSize, bytes.begin() + kHeaderSize + declared_payload_len);
     return f;
+}
+
+std::vector<uint8_t> pack_file_metadata(const std::string& filename, uint64_t filesize,
+                                          const std::array<uint8_t, 32>& sha) {
+    std::vector<uint8_t> out;
+    const uint8_t name_len = static_cast<uint8_t>(std::min<size_t>(filename.size(), 255));
+    out.push_back(name_len);
+    out.insert(out.end(), filename.begin(), filename.begin() + name_len);
+    put_u64(out, filesize);
+    out.insert(out.end(), sha.begin(), sha.end());
+    return out;
+}
+
+bool parse_file_metadata(const std::vector<uint8_t>& payload, TransferMetadata& meta) {
+    if (payload.empty()) return false;
+    const uint8_t name_len = payload[0];
+    const size_t needed = size_t(1) + name_len + 8 + 32;
+    if (payload.size() < needed) return false;
+    meta.filename.assign(payload.begin() + 1, payload.begin() + 1 + name_len);
+    meta.filesize = get_u64(&payload[1 + name_len]);
+    std::copy(payload.begin() + 1 + name_len + 8, payload.begin() + 1 + name_len + 8 + 32, meta.sha256.begin());
+    return true;
 }
 
 } // namespace qrtp

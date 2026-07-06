@@ -20,40 +20,8 @@ void put_u32(std::vector<uint8_t>& b, uint32_t v) {
     b.push_back(uint8_t(v));
 }
 
-void put_u64(std::vector<uint8_t>& b, uint64_t v) {
-    for (int i = 7; i >= 0; --i) b.push_back(uint8_t(v >> (i * 8)));
-}
-
 uint32_t get_u32(const uint8_t* p) {
     return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
-}
-
-uint64_t get_u64(const uint8_t* p) {
-    uint64_t v = 0;
-    for (int i = 0; i < 8; ++i) v = (v << 8) | p[i];
-    return v;
-}
-
-std::vector<uint8_t> pack_syn(const std::string& filename, uint64_t filesize,
-                               const std::array<uint8_t, 32>& sha) {
-    std::vector<uint8_t> out;
-    const uint8_t name_len = static_cast<uint8_t>(std::min<size_t>(filename.size(), 255));
-    out.push_back(name_len);
-    out.insert(out.end(), filename.begin(), filename.begin() + name_len);
-    put_u64(out, filesize);
-    out.insert(out.end(), sha.begin(), sha.end());
-    return out;
-}
-
-bool parse_syn(const std::vector<uint8_t>& payload, TransferMetadata& meta) {
-    if (payload.empty()) return false;
-    const uint8_t name_len = payload[0];
-    const size_t needed = size_t(1) + name_len + 8 + 32;
-    if (payload.size() < needed) return false;
-    meta.filename.assign(payload.begin() + 1, payload.begin() + 1 + name_len);
-    meta.filesize = get_u64(&payload[1 + name_len]);
-    std::copy(payload.begin() + 1 + name_len + 8, payload.begin() + 1 + name_len + 8 + 32, meta.sha256.begin());
-    return true;
 }
 
 // SACK payload: repeated (offset:u32, length:u32) entries for chunks buffered strictly ahead of
@@ -140,7 +108,7 @@ TransferResult Sender::send_file(const std::filesystem::path& path) {
     syn.type = FrameType::SYN;
     syn.session_id = session_id_;
     syn.ack_window = static_cast<uint32_t>(adaptive_.window_size());
-    syn.payload = pack_syn(path.filename().string(), filesize, digest);
+    syn.payload = pack_file_metadata(path.filename().string(), filesize, digest);
 
     Frame syn_ack;
     bool got_syn_ack = false;
@@ -354,7 +322,7 @@ std::optional<std::vector<uint8_t>> Receiver::receive_file(TransferMetadata& met
         if (cancelled()) return std::nullopt;
         if (link_.try_receive(raw, std::chrono::milliseconds(200))) {
             auto f = decode_frame(raw);
-            if (f && f->type == FrameType::SYN && parse_syn(f->payload, meta_out)) {
+            if (f && f->type == FrameType::SYN && parse_file_metadata(f->payload, meta_out)) {
                 session_id = f->session_id;
                 got_syn = true;
             }

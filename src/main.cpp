@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 
+#include "qrtp/broadcast.hpp"
 #include "qrtp/link.hpp"
 #include "qrtp/protocol.hpp"
 #include "qrtp/qr_encoder.hpp"
@@ -85,9 +86,34 @@ void print_usage() {
         "                          [--wechat-model-dir DIR] [--no-contrast-boost] [--chunk-max N]\n"
         "      Receive over the real optical link. Same --width/--height, --qr-grid, --no-mjpeg,\n"
         "      --lock-focus, --no-wechat-qrcode, --wechat-model-dir, --no-contrast-boost and\n"
-        "      --chunk-max notes as above.\n");
+        "      --chunk-max notes as above.\n\n"
+        "  qrtp broadcast <file> [--camera N] [--fps F] [--chunk-size N] [--ec-level L|M|Q|H]\n"
+        "                        [--loops N] [--width W --height H] [--no-mjpeg] [--lock-focus]\n"
+        "                        [--no-wechat-qrcode] [--no-contrast-boost] [...]\n"
+        "      One-way (simplex) transfer: coexists with `send`/`receive` as a separate mode, for\n"
+        "      when there is no return channel at all — the sender never expects, or is able to\n"
+        "      receive, any reply. Reliability comes entirely from repetition instead of ARQ: this\n"
+        "      loops the whole file (a header frame with filename/size/hash, then every fixed-size\n"
+        "      chunk) either forever (--loops 0, the default — a continuous broadcast/kiosk-style\n"
+        "      transmission) or a fixed number of times (--loops N). --chunk-size (default 180\n"
+        "      bytes) and --ec-level (default Q — higher than send/receive's M, since a lost/\n"
+        "      corrupted read here isn't retried until the next loop, so extra per-QR redundancy\n"
+        "      directly improves the odds each individual read succeeds) are both fixed for the\n"
+        "      whole broadcast, unlike the AIMD-adapted values `send`/`receive` use. Same\n"
+        "      --camera/--width/--height/--no-mjpeg/--lock-focus/--no-wechat-qrcode/\n"
+        "      --no-contrast-boost/--wechat-model-dir flags as `send`.\n\n"
+        "  qrtp listen --out <dir> [--camera N] [--fps F] [--chunk-size N] [--ec-level L|M|Q|H]\n"
+        "                         [--timeout SECONDS] [--width W --height H] [--no-mjpeg]\n"
+        "                         [--lock-focus] [--no-wechat-qrcode] [--no-contrast-boost] [...]\n"
+        "      Receives a `broadcast` transmission. Only needs a camera pointed at the sender's\n"
+        "      screen — never sends anything back. Assembles the file from whatever it manages to\n"
+        "      capture across one or more of the sender's loops, finishing the moment it has the\n"
+        "      complete file with a verified SHA-256 hash (does not need the sender's current loop\n"
+        "      to finish first). --chunk-size/--ec-level must match what the sender used.\n"
+        "      --timeout (default 1800s) is the overall giving-up point if the file never\n"
+        "      completes. Same camera flags as `receive`.\n");
 #else
-        "  qrtp send / qrtp receive\n"
+        "  qrtp send / qrtp receive / qrtp broadcast / qrtp listen\n"
         "      Not available in this build — rebuild with `make WITH_OPENCV=1` after\n"
         "      installing opencv-devel to enable the real screen+camera link.\n");
 #endif
@@ -164,6 +190,22 @@ int cmd_demo(int argc, char** argv) {
 }
 
 #ifdef QRTP_WITH_OPENCV
+// Camera/capture flags shared by all four optical subcommands (send/receive/broadcast/listen).
+// Returns true if `a` was recognized and consumed (advancing i for flags that take a value).
+bool parse_camera_flag(const std::string& a, int argc, char** argv, int& i, qrtp::OpticalLinkConfig& ocfg) {
+    if (a == "--camera" && i + 1 < argc) ocfg.camera_index = std::stoi(argv[++i]);
+    else if (a == "--width" && i + 1 < argc) ocfg.camera_width = std::stoi(argv[++i]);
+    else if (a == "--height" && i + 1 < argc) ocfg.camera_height = std::stoi(argv[++i]);
+    else if (a == "--qr-grid" && i + 1 < argc) ocfg.qr_codes_per_frame = std::stoi(argv[++i]);
+    else if (a == "--no-mjpeg") ocfg.request_mjpeg = false;
+    else if (a == "--lock-focus") ocfg.disable_autofocus = true;
+    else if (a == "--no-wechat-qrcode") ocfg.use_wechat_qrcode = false;
+    else if (a == "--wechat-model-dir" && i + 1 < argc) ocfg.wechat_qrcode_model_dir = argv[++i];
+    else if (a == "--no-contrast-boost") ocfg.enhance_camera_contrast = false;
+    else return false;
+    return true;
+}
+
 int cmd_send_optical(int argc, char** argv) {
     if (argc < 3) {
         print_usage();
@@ -174,17 +216,9 @@ int cmd_send_optical(int argc, char** argv) {
     std::optional<size_t> chunk_max_override;
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--camera" && i + 1 < argc) ocfg.camera_index = std::stoi(argv[++i]);
-        else if (a == "--fps" && i + 1 < argc) ocfg.fps = std::stod(argv[++i]);
-        else if (a == "--width" && i + 1 < argc) ocfg.camera_width = std::stoi(argv[++i]);
-        else if (a == "--height" && i + 1 < argc) ocfg.camera_height = std::stoi(argv[++i]);
-        else if (a == "--qr-grid" && i + 1 < argc) ocfg.qr_codes_per_frame = std::stoi(argv[++i]);
-        else if (a == "--no-mjpeg") ocfg.request_mjpeg = false;
-        else if (a == "--lock-focus") ocfg.disable_autofocus = true;
-        else if (a == "--no-wechat-qrcode") ocfg.use_wechat_qrcode = false;
-        else if (a == "--wechat-model-dir" && i + 1 < argc) ocfg.wechat_qrcode_model_dir = argv[++i];
-        else if (a == "--no-contrast-boost") ocfg.enhance_camera_contrast = false;
+        if (a == "--fps" && i + 1 < argc) ocfg.fps = std::stod(argv[++i]);
         else if (a == "--chunk-max" && i + 1 < argc) chunk_max_override = static_cast<size_t>(std::stoul(argv[++i]));
+        else parse_camera_flag(a, argc, argv, i, ocfg);
     }
     try {
         ocfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
@@ -208,18 +242,10 @@ int cmd_receive_optical(int argc, char** argv) {
     std::optional<size_t> chunk_max_override;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--camera" && i + 1 < argc) ocfg.camera_index = std::stoi(argv[++i]);
-        else if (a == "--fps" && i + 1 < argc) ocfg.fps = std::stod(argv[++i]);
-        else if (a == "--width" && i + 1 < argc) ocfg.camera_width = std::stoi(argv[++i]);
-        else if (a == "--height" && i + 1 < argc) ocfg.camera_height = std::stoi(argv[++i]);
-        else if (a == "--qr-grid" && i + 1 < argc) ocfg.qr_codes_per_frame = std::stoi(argv[++i]);
-        else if (a == "--no-mjpeg") ocfg.request_mjpeg = false;
-        else if (a == "--lock-focus") ocfg.disable_autofocus = true;
-        else if (a == "--no-wechat-qrcode") ocfg.use_wechat_qrcode = false;
-        else if (a == "--wechat-model-dir" && i + 1 < argc) ocfg.wechat_qrcode_model_dir = argv[++i];
-        else if (a == "--no-contrast-boost") ocfg.enhance_camera_contrast = false;
+        if (a == "--fps" && i + 1 < argc) ocfg.fps = std::stod(argv[++i]);
         else if (a == "--chunk-max" && i + 1 < argc) chunk_max_override = static_cast<size_t>(std::stoul(argv[++i]));
         else if (a == "--out" && i + 1 < argc) out_dir = argv[++i];
+        else parse_camera_flag(a, argc, argv, i, ocfg);
     }
     try {
         ocfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
@@ -244,6 +270,84 @@ int cmd_receive_optical(int argc, char** argv) {
         return 1;
     }
 }
+
+int cmd_ec_level_from_flag(const std::string& lvl, qrtp::ECLevel& out) {
+    if (lvl == "L") out = qrtp::ECLevel::L;
+    else if (lvl == "M") out = qrtp::ECLevel::M;
+    else if (lvl == "Q") out = qrtp::ECLevel::Q;
+    else if (lvl == "H") out = qrtp::ECLevel::H;
+    else return 1;
+    return 0;
+}
+
+int cmd_broadcast_optical(int argc, char** argv) {
+    if (argc < 3) {
+        print_usage();
+        return 1;
+    }
+    const std::string path = argv[2];
+    qrtp::OpticalLinkConfig ocfg;
+    qrtp::BroadcastConfig bcfg;
+    for (int i = 3; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--fps" && i + 1 < argc) bcfg.fps = std::stod(argv[++i]);
+        else if (a == "--chunk-size" && i + 1 < argc) bcfg.chunk_size = static_cast<size_t>(std::stoul(argv[++i]));
+        else if (a == "--ec-level" && i + 1 < argc) cmd_ec_level_from_flag(argv[++i], bcfg.ec_level);
+        else if (a == "--loops" && i + 1 < argc) bcfg.loops = std::stoi(argv[++i]);
+        else parse_camera_flag(a, argc, argv, i, ocfg);
+    }
+    try {
+        ocfg.fps = bcfg.fps; // only affects OpticalLink's initial "camera opened: ..." log context —
+                              // send_file() below overrides it immediately via set_fps().
+        bcfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
+        ocfg.log = bcfg.log;
+        qrtp::OpticalLink link(ocfg);
+        qrtp::BroadcastSender sender(link, bcfg);
+        const auto result = sender.send_file(path);
+        std::printf("%s: %s\n", result.success ? "OK" : "FAILED", result.message.c_str());
+        return result.success ? 0 : 1;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "broadcast failed: %s\n", e.what());
+        return 1;
+    }
+}
+
+int cmd_listen_optical(int argc, char** argv) {
+    qrtp::OpticalLinkConfig ocfg;
+    qrtp::BroadcastConfig bcfg;
+    std::string out_dir = ".";
+    std::chrono::seconds timeout(1800); // 30 minutes, matches `qrtp receive`'s own default
+    for (int i = 2; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--fps" && i + 1 < argc) bcfg.fps = std::stod(argv[++i]);
+        else if (a == "--chunk-size" && i + 1 < argc) bcfg.chunk_size = static_cast<size_t>(std::stoul(argv[++i]));
+        else if (a == "--ec-level" && i + 1 < argc) cmd_ec_level_from_flag(argv[++i], bcfg.ec_level);
+        else if (a == "--timeout" && i + 1 < argc) timeout = std::chrono::seconds(std::stoi(argv[++i]));
+        else if (a == "--out" && i + 1 < argc) out_dir = argv[++i];
+        else parse_camera_flag(a, argc, argv, i, ocfg);
+    }
+    try {
+        ocfg.fps = bcfg.fps;
+        bcfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
+        ocfg.log = bcfg.log;
+        qrtp::OpticalLink link(ocfg);
+        qrtp::BroadcastReceiver receiver(link, bcfg);
+        qrtp::TransferMetadata meta;
+        auto received = receiver.receive_file(meta, timeout);
+        if (!received) {
+            std::fprintf(stderr, "listen failed (timeout or hash mismatch)\n");
+            return 1;
+        }
+        const std::filesystem::path out_path = std::filesystem::path(out_dir) / meta.filename;
+        std::ofstream f(out_path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(received->data()), static_cast<std::streamsize>(received->size()));
+        std::printf("OK, wrote %zu bytes to %s\n", received->size(), out_path.string().c_str());
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "listen failed: %s\n", e.what());
+        return 1;
+    }
+}
 #endif
 
 } // namespace
@@ -264,8 +368,10 @@ int main(int argc, char** argv) {
 #ifdef QRTP_WITH_OPENCV
     if (cmd == "send") return cmd_send_optical(argc, argv);
     if (cmd == "receive") return cmd_receive_optical(argc, argv);
+    if (cmd == "broadcast") return cmd_broadcast_optical(argc, argv);
+    if (cmd == "listen") return cmd_listen_optical(argc, argv);
 #else
-    if (cmd == "send" || cmd == "receive") {
+    if (cmd == "send" || cmd == "receive" || cmd == "broadcast" || cmd == "listen") {
         std::fprintf(stderr,
                       "'%s' requires a build with real display/camera support: rebuild with "
                       "`make WITH_OPENCV=1` after installing opencv-devel.\n",

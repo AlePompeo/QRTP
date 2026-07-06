@@ -627,3 +627,63 @@ about real hardware throughput either way), and a full MinGW cross-compile rebui
 warnings, `dist-windows.zip` refreshed. **Not yet verified on real hardware** — same standing
 caveat as every other change to fps/chunk-size defaults in this log; this is precisely the kind of
 change past entries (v6, v9, the 2048 regression) warn needs real hardware to confirm either way.
+
+## Added a one-way (simplex) broadcast mode, coexisting with the bidirectional protocol (2026-07-06, same day)
+
+User asked for an additional transfer mode — a camera reads a QR code for purely one-way data
+communication — that coexists with the existing bidirectional (TCP-like) protocol rather than
+replacing it. Went through plan mode first given the scope (new protocol layer, CLI, GUI); two
+design questions were confirmed with the user before writing code:
+
+1. **Reliability without any return channel**: the sender loops the *entire file* (a header frame
+   with filename/size/hash, then every chunk) continuously — forever by default, or a fixed number
+   of times — instead of any fixed-repeat-per-chunk scheme. The receiver assembles whatever it
+   manages to capture across one or more of those loops and finishes the instant it has the
+   complete file with a verified SHA-256 hash, without waiting for the sender's current loop to end.
+   Chosen over fixed-repeat-per-chunk: no per-chunk redundancy count to guess at, and naturally
+   robust to any loss pattern (a chunk missed in one loop just needs to survive in a later one).
+2. **Hardware**: deliberately *not* made hardware-optional — `OpticalLink` is completely untouched;
+   both machines still open a camera and a display window exactly as today. The new mode only
+   differs in never using the reverse channel, not in what hardware it opens.
+
+**New protocol layer** (`include/qrtp/broadcast.hpp` + `src/broadcast.cpp`), much simpler than
+`protocol.cpp` since there's no ARQ/window/re-chunking at all:
+- `BroadcastConfig`: fixed (no AIMD — there's no feedback to adapt on) `chunk_size=180`,
+  `ec_level=ECLevel::Q` (higher than the bidirectional default M — a lost/corrupted read here isn't
+  retried until the next loop, so extra per-QR redundancy directly improves each read's odds),
+  `fps=10.0`, `loops=0` (0 = forever).
+- `BroadcastSender::send_file()`: reads the file + SHA-256, sets fps/ec_level on the link once, then
+  loops sending a header frame (`FrameType::SYN`) plus one `FrameType::DATA` frame per fixed-size
+  chunk, checking cancellation between frames, never waiting for any reply.
+- `BroadcastReceiver::receive_file()`: polls `try_receive()`, captures metadata from the first
+  header seen, stores `chunks[offset]=payload` (a plain overwrite — repeats across loops are always
+  byte-identical, so none of the bidirectional Receiver's "smaller-or-equal-size wins" staleness
+  logic is needed), and returns success the moment the number of distinct offsets seen matches the
+  expected chunk count *and* the reassembled SHA-256 matches — not waiting for the sender's loop.
+- `pack_syn`/`parse_syn` (previously private to `protocol.cpp`) moved to `framing.hpp`/`framing.cpp`
+  as public `pack_file_metadata`/`parse_file_metadata`, alongside `TransferMetadata` (also relocated
+  from `protocol.hpp`), so both the bidirectional and broadcast protocols share identical
+  filename/size/hash framing without duplicating it. No changes to `Frame`, `encode_frame`, or
+  `decode_frame` — the wire format itself is untouched.
+- Reuses `ILink` (`OpticalLink`/`LoopbackLink`) completely unchanged, per the hardware decision above.
+
+**CLI** (`src/main.cpp`): two new subcommands, `qrtp broadcast <file> [--chunk-size N] [--ec-level
+L|M|Q|H] [--loops N] [...]` and `qrtp listen --out <dir> [--timeout SECONDS] [...]`, sharing the
+same camera-flag parsing as `send`/`receive` via a new `parse_camera_flag()` helper (previously
+duplicated verbatim between the two).
+
+**GUI** (`src/gui_win32.cpp`): a new "Modalità unidirezionale (broadcast)" checkbox (unchecked by
+default) plus a "Loop (0=infinito)" field; `RunTransfer` branches to
+`BroadcastSender`/`BroadcastReceiver` instead of `Sender`/`Receiver` when checked, reusing the
+existing "Chunk max" field as broadcast mode's fixed chunk size and the FPS field as its fixed fps.
+Window grown from 501 to 547px tall to fit the new controls.
+
+**Verified**: no OpenCV/camera needed for the actual protocol logic — a new `test_broadcast_transfer`
+(`tests/test_main.cpp`) sends a 5000-byte file over `LoopbackLink` with 5% loss/2% corruption and
+`loops=5`, confirming exact byte-for-byte reassembly with a verified hash (run 5 times back-to-back
+with no flakiness, given the fixed RNG seed). `make test` (native) and a full MinGW cross-compile
+rebuild (`qrtp.exe`/`qrtp_gui.exe`/`qrtp_tests.exe`) both pass with zero warnings, `dist-windows.zip`
+refreshed. **Not yet verified end-to-end on real hardware** — same standing caveat as every other
+change touching the optical layer in this log; a real two-PC broadcast/listen run is the next
+confirmation needed, especially around whether the fixed `ec_level=Q`/`chunk_size=180`/`fps=10`
+defaults hold up without any ARQ safety net to fall back on.

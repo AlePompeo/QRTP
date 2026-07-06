@@ -1,7 +1,9 @@
 #pragma once
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace qrtp {
@@ -50,5 +52,20 @@ std::vector<uint8_t> encode_frame(const Frame& f);
 // trust a frame's fields until this has returned a value (the decoded QR payload is untrusted,
 // externally-sourced input, exactly like a byte stream off a socket).
 std::optional<Frame> decode_frame(const std::vector<uint8_t>& bytes);
+
+// Describes the file a transfer carries — the parsed result of pack_file_metadata()'s payload.
+struct TransferMetadata {
+    std::string filename;
+    uint64_t filesize = 0;
+    std::array<uint8_t, 32> sha256{};
+};
+
+// Packs filename/filesize/sha256 into a payload for a SYN-type (session-opening/header) frame —
+// shared by the bidirectional Sender/Receiver (protocol.cpp) and the simplex
+// BroadcastSender/BroadcastReceiver (broadcast.cpp), both of which need identical file-metadata
+// framing but otherwise share no protocol state machine.
+std::vector<uint8_t> pack_file_metadata(const std::string& filename, uint64_t filesize,
+                                          const std::array<uint8_t, 32>& sha);
+bool parse_file_metadata(const std::vector<uint8_t>& payload, TransferMetadata& meta);
 
 } // namespace qrtp

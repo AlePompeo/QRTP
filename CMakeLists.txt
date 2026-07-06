@@ -24,6 +24,7 @@ set(QRTP_CORE_SOURCES
     src/link.cpp
     src/qr_encoder.cpp
     src/protocol.cpp
+    src/broadcast.cpp
 )
 
 if(WITH_OPENCV)

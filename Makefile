@@ -11,7 +11,7 @@ TEST_DIR := tests
 BUILD_DIR := build
 BIN_DIR := bin
 
-CORE_SRCS := crc32.cpp sha256.cpp base64.cpp framing.cpp adaptive.cpp link.cpp qr_encoder.cpp protocol.cpp
+CORE_SRCS := crc32.cpp sha256.cpp base64.cpp framing.cpp adaptive.cpp link.cpp qr_encoder.cpp protocol.cpp broadcast.cpp
 
 CXXFLAGS_EXTRA :=
 LDLIBS_EXTRA :=
