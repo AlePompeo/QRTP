@@ -1730,6 +1730,18 @@ to the Makefile.
   whether `requestAnimationFrame`-rate decode polling actually keeps up with `getUserMedia`'s real
   frame delivery cadence, and whether Asyncify's suspend/resume behaves identically across engines
   (only ever exercised here under V8/Node — Firefox/Safari use different WASM engines entirely).
+  **Update 2026-07-06 (same day): first real browser/camera feedback arrived.** Sending a large
+  image in broadcast mode produced a downloaded file that looked corrupted despite a verified
+  hash. Root-caused to a real, now-fixed bug (received files were always literally named
+  `input_file`, no extension — see PROGRESS.md's "Investigated a real-hardware bug report..."
+  entry for the full writeup) rather than an actual hash-verification defect; the fountain-code
+  decoder itself was re-verified correct via 270 targeted Monte Carlo trials against the real
+  compiled `fountain.cpp`. Still not independently confirmed against real hardware after the fix —
+  a full WASM-stack synthetic reproduction (same file size/loss profile, through actual
+  QR-encode/decode/Asyncify, not just the algorithm) was attempted but stopped after 30+ minutes
+  without finishing (too slow to be practical at this scale in this environment), so real-camera
+  re-testing after the filename fix is the next real confirmation step, not a repeat algorithm
+  audit.
 
 ## Anticipated failure modes to validate once the real optical link is tested against hardware
 

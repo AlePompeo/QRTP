@@ -1423,3 +1423,80 @@ stop button live in files shared by every platform target:
 All four Linux rebuilds' own test suites passed inside their respective containers/native
 environment before packaging, not just compiled — same verification bar as every other release
 this project has published.
+
+## Investigated a real-hardware bug report: "hash verifies but the received file is corrupted, only on large files" (same day)
+
+First genuine end-to-end usage feedback the web app has gotten (real browser + real camera):
+sending an image in broadcast/unidirectional mode, the receiver reported the SHA-256 hash as
+verified, yet the downloaded file was unusable — appearing as a generic, unrecognized file, "as if"
+corrupted. Reported as size-dependent: never happened on small test files, only large ones (an
+image, likely several hundred KB to a few MB — thousands of fountain-code blocks at the default
+180-byte chunk size).
+
+**Two separate things were going on, only one of which was an actual bug:**
+
+1. **Real, confirmed bug (now fixed): every downloaded file was literally named `input_file`, no
+   extension, regardless of size.** `Sender`/`BroadcastSender::send_file()` derive the transmitted
+   filename via `path.filename().string()` (`protocol.cpp`/`broadcast.cpp`, unchanged, correct for
+   every native platform, which pass the real picked file's path) — but the web app always writes
+   the picked `File` to a *fixed* MEMFS path (`/input_file`) before calling into WASM, discarding
+   the real name before it ever reaches that code. A file with no extension won't be recognized as
+   an image by the OS/file manager regardless of whether its bytes are correct — this alone fully
+   explains "appears as a generic corrupted input file," independent of size. Fixed in
+   `web/main.js`: both send paths (`onStart()`'s bidirectional and broadcast branches) now write
+   the upload to `"/" + file.name` instead of the fixed path, and pass that same path into
+   `runSend`/`runBroadcastSend` — `path.filename().string()` then naturally recovers the real name
+   and extension on the wire, no C++ change needed anywhere.
+
+2. **Investigated as a possible fountain-code correctness bug, concluded it is not one.** The
+   user's own hypothesis was reasonable on its face: if a specific packet (e.g. symbol/packet 234
+   of 700) never arrives, how can the hash still verify? The answer is that this is the fountain
+   code working exactly as designed, not a bug: `BroadcastReceiver::receive_file()` only accepts
+   the assembled result once `LtDecoder::is_complete()` — meaning every source block has actually
+   been resolved, whether directly (its own systematic symbol) or algebraically (XOR-cancelled out
+   of a later, higher-degree symbol that also covered other already-resolved blocks). A "missing
+   packet" in the everyday byte-offset sense the old (pre-fountain) scheme relied on no longer maps
+   onto "missing information" the way it used to. `LtDecoder::assemble()` still throws if any block
+   is truly unresolved (i.e. redundancy ran out before recovering it), and that exception is caught
+   by `WebSession::run_broadcast_receive` and correctly reported as a *failed* transfer — so a
+   genuinely-unrecoverable block cannot silently produce a "successful" download either.
+   Re-verified this deterministically: a standalone harness driving the actual compiled
+   `fountain.cpp` (not a reimplementation) ran 270 trials — 30 random seeds × loss rates
+   {10%, 20%, 30%} × K ∈ {700, 2845, 5000} blocks (700 matching the user's own example; 2845/5000
+   matching a several-hundred-KB-to-multi-MB image at the default 180-byte chunk size) — comparing
+   every resolved block byte-for-byte against the original once `is_complete()` was true. All 270
+   passed with zero mismatches, including the exact "one specific packet dropped, recovered purely
+   via peeling" scenario from the bug report. No corruption-that-still-hashes-correctly was ever
+   produced. Also re-read `framing.cpp`'s CRC32/frame-length/metadata-packing code end to end
+   looking for a silent size-dependent truncation (e.g. a 16-bit field that could wrap for a large
+   file) — `seq`/`ack_window` are full 32-bit wire fields, `filesize` is 64-bit, `sha256` is a fixed
+   32-byte array compared in full; nothing there is size-dependent either.
+
+**Conclusion**: no algorithmic hash-verification bypass exists in the fountain/broadcast code.
+The reported corruption is attributed to bug (1) above (now fixed); the "packet 234 missing yet
+verified" observation was the fountain code correctly doing its job, not evidence of a defect.
+Native test suite (including the existing `test_fountain_code`/`test_broadcast_high_loss_reliability`
+tests) still passes. **Residual caveat, stated honestly rather than swept under the rug**: a
+full end-to-end reproduction attempt through the actual WASM/Asyncify/zxing-cpp/base64 stack (not
+just the pure-C++ `fountain.cpp` logic) was started via a Node harness modeled on
+`web/roundtrip_test.mjs`, simulating a 500KB file with 15% random per-poll loss — it was still
+running after 30+ minutes of wall-clock time (WASM/Asyncify per-symbol overhead at this scale is
+substantial) and was stopped before completion once the targeted native evidence above was judged
+sufficient. If the corruption still reproduces after this fix on real hardware, that would point
+to something specific to the real capture/decode pipeline (camera/canvas/zxing-cpp under real
+lighting) rather than the fountain/broadcast logic itself — worth a fresh, size-matched real-camera
+test rather than re-auditing the algorithm again.
+
+## Selectable unidirectional FPS extended to 10/15/24 (same day)
+
+Extends the earlier 3/5/7 selector (see "Selectable unidirectional FPS (3/5/7)..." above) with
+three more choices, same pattern across all three GUIs — `gui_win32.cpp`'s `IDC_FPS_BROADCAST_EDIT`
+combobox, `gui_gtk.cpp`'s `fps_broadcast_entry` combobox, and `web/index.html`'s
+`#broadcastFpsInput` `<select>` — all still a fixed list (`CBS_DROPDOWNLIST` / no free text),
+default still 3. No core/protocol change: `BroadcastConfig::fps` was already an unconstrained
+`double`; this is purely a GUI-level choice of which values are easy to pick. Rebuilt and verified:
+native Linux GTK3 (`make WITH_OPENCV=1 bin/qrtp_gui`), MinGW Windows cross-compile
+(`cmake --build build-win --target qrtp_gui`), WASM web (`cmake --build build-wasm --target
+qrtp_web` — no-op here since only `index.html`/no C++ changed for this part), and the native test
+suite (`make WITH_OPENCV=1 bin/qrtp_tests && ./bin/qrtp_tests`, all passing, unaffected since this
+touches no core files).

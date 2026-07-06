@@ -417,13 +417,16 @@ int main(int argc, char** argv) {
     gtk_container_set_border_width(GTK_CONTAINER(broadcast_grid), 8);
     gtk_container_add(GTK_CONTAINER(broadcast_frame), broadcast_grid);
 
-    // Selezionabile tra 3, 5, 7 (non testo libero) — questa modalità non ha AIMD da cui adattare
-    // un fps, quindi resta un piccolo insieme di valori sicuri predefiniti invece di un unico
-    // valore forzato o testo libero arbitrario.
+    // Selezionabile tra 3, 5, 7, 10, 15, 24 (non testo libero) — questa modalità non ha AIMD da cui
+    // adattare un fps, quindi resta un piccolo insieme di valori sicuri predefiniti invece di un
+    // unico valore forzato o testo libero arbitrario.
     g_app->fps_broadcast_entry = gtk_combo_box_text_new();
     gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(g_app->fps_broadcast_entry), "3");
     gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(g_app->fps_broadcast_entry), "5");
     gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(g_app->fps_broadcast_entry), "7");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(g_app->fps_broadcast_entry), "10");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(g_app->fps_broadcast_entry), "15");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(g_app->fps_broadcast_entry), "24");
     gtk_combo_box_set_active(GTK_COMBO_BOX(g_app->fps_broadcast_entry), 0); // default: 3
     gtk_grid_attach(GTK_GRID(broadcast_grid), gtk_label_new("FPS:"), 0, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(broadcast_grid), g_app->fps_broadcast_entry, 1, 0, 1, 1);

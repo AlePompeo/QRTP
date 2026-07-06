@@ -368,10 +368,15 @@ async function onStart() {
       const file = $("fileInput").files[0];
       if (!file) throw new Error("nessun file selezionato");
       const buf = new Uint8Array(await file.arrayBuffer());
-      Module.FS.writeFile("/input_file", buf);
+      // Il nome scritto qui è quello che Sender::send_file() (protocol.cpp) legge via
+      // path.filename().string() e trasmette nell'header -- usare il nome reale del file
+      // scelto (invece di un percorso fisso tipo "/input_file") è ciò che permette al
+      // ricevitore di scaricare il file con la sua estensione originale.
+      const memPath = "/" + file.name;
+      Module.FS.writeFile(memPath, buf);
       const fps = parseFloat($("fpsInput").value);
       const chunkMax = parseInt($("chunkMaxInput").value, 10);
-      const result = await session.runSend("/input_file", fps, chunkMax, ecLevel, colorMultiplexActive);
+      const result = await session.runSend(memPath, fps, chunkMax, ecLevel, colorMultiplexActive);
       log("[send] " + (result.success ? "completato: " : "fallito: ") + result.message);
       $("statusLabel").textContent = result.success ? "Invio completato." : "Invio fallito.";
     } else if (mode === "bidir" && role === "receive") {
@@ -382,12 +387,14 @@ async function onStart() {
       const file = $("fileInput").files[0];
       if (!file) throw new Error("nessun file selezionato");
       const buf = new Uint8Array(await file.arrayBuffer());
-      Module.FS.writeFile("/input_file", buf);
+      // Vedi commento nel ramo bidirezionale sopra: nome reale invece del percorso fisso.
+      const memPath = "/" + file.name;
+      Module.FS.writeFile(memPath, buf);
       const chunk = parseInt($("broadcastChunkInput").value, 10);
       const loops = parseInt($("loopsInput").value, 10);
       const broadcastFps = parseFloat($("broadcastFpsInput").value);
       const result = await session.runBroadcastSend(
-        "/input_file", broadcastFps, chunk, ecLevel, loops, colorMultiplexActive);
+        memPath, broadcastFps, chunk, ecLevel, loops, colorMultiplexActive);
       log("[broadcast-send] " + (result.success ? "completato: " : "fallito: ") + result.message);
       $("statusLabel").textContent = result.success ? "Invio completato." : "Invio fallito.";
     } else {

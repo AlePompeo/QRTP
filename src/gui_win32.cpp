@@ -293,17 +293,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // quando è selezionata Bidirezionale — vedi UpdateModeUI) ---
             mk(L"BUTTON", L"Unidirezionale (broadcast)", BS_GROUPBOX, 260, 248, 245, 100, 0);
             mk(L"STATIC", L"FPS:", 0, 270, 268, 75, 18, 0);
-            // Selezionabile tra 3, 5, 7 (CBS_DROPDOWNLIST: nessun testo libero) — questa modalità
-            // non ha AIMD da cui adattare un fps (nessun canale di feedback), quindi resta un
-            // piccolo insieme di valori sicuri predefiniti invece di un unico valore forzato.
-            // L'altezza (100) include lo spazio per la lista a tendina aperta — quirk di Win32,
-            // la finestra visibile a riposo resta comunque alta quanto un EDIT singola riga.
+            // Selezionabile tra 3, 5, 7, 10, 15, 24 (CBS_DROPDOWNLIST: nessun testo libero) — questa
+            // modalità non ha AIMD da cui adattare un fps (nessun canale di feedback), quindi resta
+            // un piccolo insieme di valori sicuri predefiniti invece di un unico valore forzato.
+            // L'altezza (160) include lo spazio per la lista a tendina aperta (6 voci) — quirk di
+            // Win32, la finestra visibile a riposo resta comunque alta quanto un EDIT singola riga.
             {
-                HWND fps_bc = mk(L"COMBOBOX", L"", WS_BORDER | CBS_DROPDOWNLIST, 350, 265, 55, 100,
+                HWND fps_bc = mk(L"COMBOBOX", L"", WS_BORDER | CBS_DROPDOWNLIST, 350, 265, 55, 160,
                                   IDC_FPS_BROADCAST_EDIT);
                 SendMessageW(fps_bc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"3"));
                 SendMessageW(fps_bc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"5"));
                 SendMessageW(fps_bc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"7"));
+                SendMessageW(fps_bc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"10"));
+                SendMessageW(fps_bc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"15"));
+                SendMessageW(fps_bc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"24"));
                 SendMessageW(fps_bc, CB_SETCURSEL, 0, 0); // default: 3
             }
             mk(L"STATIC", L"Chunk (byte):", 0, 270, 292, 85, 18, 0);
