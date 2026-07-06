@@ -1399,3 +1399,27 @@ real AIMD retransmit mid-transfer, a genuine stress case, not just a happy path.
 re-run clean (unaffected — this feature is entirely inside `wasm_link.cpp`/`web/`). **Not tested
 in an actual browser or with a real camera** — same standing gap as the rest of the web port, more
 pronounced here given the deliberately unconventional (color-carries-data) assumption.
+
+## Published: v57 (same day)
+
+Committed (`dabbaa0`) and pushed to `main`, then republished as release v57 (tag
+`v0.1.0-windows-preview`, title bumped) with **all six** distribution assets refreshed from a
+clean rebuild — not just the ones directly touched — since the fountain code and the on-screen
+stop button live in files shared by every platform target:
+
+- `dist-windows.zip` — MinGW cross-compiled `qrtp.exe`/`qrtp_gui.exe`/`qrtp_tests.exe`
+- `qrtp-linux-x86_64-fedora.tar.gz` — native build in this dev environment
+- `qrtp-linux-x86_64-{ubuntu2204,ubuntu2404,debian12}.tar.gz` — rebuilt in podman containers,
+  same technique as the original per-distro verification effort; hit the same SELinux `:Z`
+  concurrent-relabel race from that earlier session again when three containers were started at
+  once against the same mounted script/source paths — fixed the same way (dedicated script copy
+  per container) plus running them sequentially this time instead of in parallel, since the race
+  turned out to also affect the shared source-directory mount itself, not just the script file.
+  Debian 12 additionally needed `-o Acquire::Check-Date=false` for `apt-get update` (a Release
+  file "not valid yet" clock-skew rejection, unrelated to the SELinux issue).
+- `qrtp-web.zip` — refreshed WASM build + web assets, still binary-only (no source, no
+  `third_party/` toolchain, no dev-only test script)
+
+All four Linux rebuilds' own test suites passed inside their respective containers/native
+environment before packaging, not just compiled — same verification bar as every other release
+this project has published.
