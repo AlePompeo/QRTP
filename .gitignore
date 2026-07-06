@@ -3,3 +3,5 @@
 /build-win/
 /dist-windows/
 /dist-windows.zip
+/dist-linux/
+/qrtp-linux-x86_64.tar.gz

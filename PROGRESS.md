@@ -818,3 +818,37 @@ block is gated behind `UNIX AND NOT APPLE`, never evaluated true when cross-comp
 Windows), `dist-windows.zip` refreshed. **Not yet tested with a real camera/optical transfer on
 Linux** — this session had no physical camera hardware, same standing limitation as every other
 platform this project targets.
+
+## Linux distribution package (`qrtp-linux-x86_64.tar.gz`) (2026-07-06, same day)
+
+User asked for a Linux equivalent of the Windows release asset (`dist-windows.zip`). Three
+approaches were weighed given a real constraint discovered along the way: Fedora's `opencv-devel`
+pulls in ~50+ `libopencv_*.so` modules via `pkg-config --libs opencv4` (vs. the Windows build's
+deliberately minimal 11-module custom OpenCV build — see the 2026-07-05 OpenEXR-crash entry), so a
+fully self-contained bundle (AppImage) would be disproportionately large unless OpenCV were
+rebuilt from source with a matching minimal `BUILD_LIST`, mirroring the Windows approach.
+
+Started down that path (found the exact minimal module list already proven for Windows —
+`core,imgproc,imgcodecs,videoio,highgui,objdetect,dnn,calib3d,features2d,flann,wechat_qrcode` — and
+the original OpenCV/opencv_contrib 4.11.0 source tarballs still on disk from that earlier build),
+but this dev environment turned out to be genuinely resource-constrained (3.8GB RAM with well
+under 1GB free at the time, zram swap already 70%+ used) — a real risk of an OOM-killed build
+partway through. Freed ~2.2GB of disk headroom first (user-confirmed, item by item: emptied
+`~/.local/share/Trash` at 1.3GB, cleared several user-level caches) but the tighter RAM constraint
+remained, so the user decided to defer the from-source rebuild and ship the simpler option instead
+for now.
+
+**Shipped**: a plain tarball (`dist-linux/` → `qrtp-linux-x86_64.tar.gz`, 1.2MB compressed) with
+just the three stripped binaries (`qrtp`/`qrtp_gui`/`qrtp_tests`, ~260KB each after `strip`),
+`models/wechat_qrcode/`, `linux/icon/qrtp.png`, `linux/qrtp.desktop`, and a `README.txt` listing
+the one-line install command for `opencv`/`gtk3` on Fedora/Debian-Ubuntu/Arch/openSUSE — relies on
+the distribution's own package manager for OpenCV/GTK3 instead of bundling them, which is the
+idiomatic Linux distribution model anyway (unlike Windows, where bundling DLLs is the norm since
+there's no universal system package manager to lean on). Revisit the from-source minimal-OpenCV +
+AppImage path later if a truly zero-prerequisite single-file distributable is wanted — the exact
+`BUILD_LIST` to use is already recorded above.
+
+**Verified**: extracted the tarball to a clean directory and ran the three binaries from there
+(not from the dev `bin/` tree) — `qrtp_tests` all passing, `qrtp send --camera 0` failing cleanly
+with no camera present (same real V4L2 open-path exercised as the native build entry above), and
+`qrtp_gui` launched under the real `DISPLAY` available in this environment without errors.
