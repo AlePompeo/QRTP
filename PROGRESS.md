@@ -1145,3 +1145,10 @@ camera dropdown, `enumerateDevices()` — more so now that the camera-switch bug
 **Not verified on real hardware** — same standing gap as the rest of the web port; the `zoom`
 capability's actual availability/behavior varies enough by phone and browser version that this
 needs to be tried on the user's own device to know whether it does anything.
+
+**Published**: committed to `main` (commit `74cc815`), pushed, and released as `qrtp-web.zip`
+under the existing rolling release tag (`v0.1.0-windows-preview`, title bumped to v56) —
+deliberately binary-only (`index.html`/`main.js`/`style.css`/`qrtp_web.js`/`qrtp_web.wasm` plus a
+usage `README.txt`), same convention as the Windows/Linux distributables: no C++ source, no
+`third_party/` build toolchain, no dev-only `roundtrip_test.mjs` in the shipped asset — those stay
+in the git repo only.
