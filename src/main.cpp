@@ -72,7 +72,7 @@ void print_usage() {
         "      low-contrast captures that trip up a QR decoder (dim monitor backlight, glare,\n"
         "      ambient light). Pass --no-contrast-boost to leave the camera's own contrast/\n"
         "      saturation settings untouched, if a specific camera is already well-tuned.\n"
-        "      --chunk-max N overrides AdaptiveConfig::chunk_size_max (default 1024 bytes of file\n"
+        "      --chunk-max N overrides AdaptiveConfig::chunk_size_max (default 180 bytes of file\n"
         "      payload per DATA frame — the AIMD's ceiling on how dense a QR code's payload is\n"
         "      allowed to grow to). Higher values pack more bytes per QR (fewer QR codes needed for\n"
         "      the same file) at the cost of a higher QR version — larger, more finely-detailed\n"

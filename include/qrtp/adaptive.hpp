@@ -14,7 +14,13 @@ struct AdaptiveConfig {
     size_t window_min = 1;
     size_t window_max = 64;
 
-    size_t chunk_size_initial = 256; // bytes of file payload per DATA frame (QR-density proxy)
+    // Was 256, lowered to 180 (2026-07-06) together with chunk_size_max below, per explicit user
+    // request — kept equal to chunk_size_max so the controller starts already at the (new, lower)
+    // ceiling instead of above it: chunk_size_max alone caps how far upshift() can *grow* chunk
+    // size, it doesn't retroactively shrink a starting value that's already above it, so leaving
+    // this at the old 256 would have meant starting 76 bytes above the new max — a confusing,
+    // inconsistent initial state upshift()'s own ceiling logic was never designed to correct for.
+    size_t chunk_size_initial = 180; // bytes of file payload per DATA frame (QR-density proxy)
     size_t chunk_size_min = 32;
     // History: 1500 (v1-18) -> 2048, real regression, reverted -> 1024 -> 1500 (see not_working.md
     // for the 2048 postmortem — turned out to be a render-loop bug, fixed separately, not chunk
@@ -27,12 +33,15 @@ struct AdaptiveConfig {
     // on-screen size to plausibly hurt decode *reliability* even if raw decode time doesn't scale
     // much (the v9 finding, same mechanism as raising EC level) — untested territory, not disproven
     // safe either way.
+    // 1024 -> 180 (2026-07-06), explicit user request, paired with raising fps_initial to 10 below
+    // — smaller, simpler QR codes (lower version, coarser modules) at a faster flash rate, instead
+    // of fewer/denser codes at a slower one. Untested on real hardware in this direction yet.
     // Safe regardless of this value: upshift() caps chunk growth by what the *current* EC level can
     // actually encode (see max_chunk_for_ec_level in adaptive.cpp) — previously nothing stopped
     // chunk size from growing back up while EC level was still elevated from an earlier downshift,
     // which could ask qr_encode_bytes() for a payload too large for that EC level and throw,
     // hard-failing the transfer regardless of this constant.
-    size_t chunk_size_max = 1024;
+    size_t chunk_size_max = 180;
 
     ECLevel ec_level_initial = ECLevel::M;
 
@@ -46,7 +55,14 @@ struct AdaptiveConfig {
     // any chance to settle focus/exposure at all. fps_max stays 60 (that ceiling *is*
     // real-hardware-confirmed, v12) — a genuinely good channel still ramps up there quickly via
     // upshift()'s existing multiplicative growth; this only changes where it's required to start.
-    double fps_initial = 3.0;
+    //
+    // 3.0 -> 10.0 (2026-07-06), explicit user request — deliberately re-enters the exact territory
+    // the v6 evidence above found too fast for reliable focus/exposure lock, so it directly
+    // contradicts that once-documented finding rather than building on new evidence superseding it.
+    // Worth revisiting given everything since v6 that could plausibly change the calculus (camera
+    // contrast/saturation tuning, MJPEG, WeChatQRCode, capture/decode pipelining) — but flagged
+    // here, not silently assumed safe, in case it reproduces the same v6 symptom.
+    double fps_initial = 10.0;
     double fps_min = 1.0;
     double fps_max = 60.0;
 

@@ -14,12 +14,12 @@ namespace qrtp {
 
 struct OpticalLinkConfig {
     int camera_index = 0;
-    // Reverted 24 -> 3 (see AdaptiveConfig::fps_initial for the full reasoning — starting fast
-    // skips the "prove the channel first" step the AIMD is built around, especially risky right
-    // at the handshake before the camera has settled focus/exposure at all). Matches
+    // Reverted 24 -> 3, then explicit user request 3 -> 10 (2026-07-06) — see
+    // AdaptiveConfig::fps_initial for the full reasoning, including why 10 specifically reopens a
+    // once-documented real-hardware finding rather than building on new evidence. Matches
     // AdaptiveConfig::fps_initial — this is only the value the link is constructed with before any
     // Sender/Receiver ever calls set_fps(); the AIMD takes over from there.
-    double fps = 3.0;
+    double fps = 10.0;
     QrEcLevel ec_level = QrEcLevel::M;
     // Was 1280x720 (2026-07-05, per real hardware testing across two separate machines), then
     // lowered to 640x480 (still 2026-07-05) to match a GUI-only preference the user later decided

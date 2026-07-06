@@ -593,3 +593,37 @@ test` (native) and a full MinGW cross-compile rebuild with zero warnings.
 (`qrtp.exe`/`qrtp_gui.exe`/`qrtp_tests.exe`), `dist-windows.zip` refreshed. **Not yet confirmed
 end-to-end on real camera hardware** — same standing caveat as every other change to this
 experimental, opt-in path.
+
+## Raised fps_initial 3 -> 10 and lowered chunk_size_max/chunk_size_initial 1024/256 -> 180 (2026-07-06, same day)
+
+Explicit user request: faster starting flash rate, smaller/simpler QR codes. Changed in both
+places each constant is tracked (`AdaptiveConfig` in `adaptive.hpp` — the real library/CLI default
+— and `OpticalLinkConfig::fps`, the link's own starting value before any `Sender`/`Receiver`
+`AdaptiveController` calls `set_fps()`), plus the GUI's own pre-filled "Chunk max" field (now
+`180`, matching) and the CLI `--chunk-max` help text. The GUI's own FPS field was **not** changed —
+it's already a separate, deliberately-higher GUI-only default (`30`, from 2026-07-05), not the
+value of `3` the request specifically named.
+
+Also lowered `chunk_size_initial` from 256 to 180, matching the new `chunk_size_max`, even though
+only "chunk max" was requested: `chunk_size_max` alone caps how far `upshift()` can *grow* chunk
+size, it doesn't retroactively shrink a starting value already above it — leaving
+`chunk_size_initial` at 256 would have meant starting 76 bytes *above* the new ceiling, a confusing
+inconsistent initial state. Setting both to 180 means the controller starts already at the (new)
+ceiling, can shrink below it under loss same as before, and grows back up to it via `upshift()`.
+
+**Flagged, not silently assumed safe**: raising `fps_initial` to 10 directly re-enters the exact
+territory the v6 real-hardware finding (`adaptive.hpp`'s own long-standing comment) found too fast
+for a webcam to reliably lock focus/exposure — this change contradicts that once-documented
+finding rather than building on new evidence superseding it. Worth revisiting given everything
+since v6 that could plausibly change the calculus (camera contrast/saturation tuning, MJPEG,
+WeChatQRCode, capture/decode pipelining) — but noted here in case it reproduces the same v6
+symptom on real hardware.
+
+**Verified**: `make test` (native), a 3MB randomized loopback `demo` transfer (5% loss/2%
+corruption, hash verified — took longer in wall-clock terms than the same transfer at the old
+1024-byte chunk size, expected: `LoopbackLink` doesn't model display dwell time/fps at all, so more,
+smaller chunks under a fixed per-frame simulated latency is purely more total frames, not evidence
+about real hardware throughput either way), and a full MinGW cross-compile rebuild with zero
+warnings, `dist-windows.zip` refreshed. **Not yet verified on real hardware** — same standing
+caveat as every other change to fps/chunk-size defaults in this log; this is precisely the kind of
+change past entries (v6, v9, the 2048 regression) warn needs real hardware to confirm either way.

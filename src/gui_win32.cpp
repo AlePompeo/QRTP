@@ -211,11 +211,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             mk(L"EDIT", L"0", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 110, 77, 50, 22, IDC_CAMERA_EDIT);
             mk(L"STATIC", L"FPS:", 0, 175, 80, 40, 20, 0);
             // GUI-only default of 30 (2026-07-05) — deliberately higher than the library/CLI
-            // default (OpticalLinkConfig::fps = 3.0, still used by `qrtp send`/`qrtp receive` and
-            // as the AdaptiveController's own fps_initial): requested specifically for GUI use,
-            // paired with the lower 640x480 resolution default and WeChatQRCode below. Still just
-            // the pre-filled text of an editable field, not a code-level change to the safe
-            // handshake-survives-camera-settling starting point documented in AdaptiveConfig.
+            // default (OpticalLinkConfig::fps, still used by `qrtp send`/`qrtp receive` and as the
+            // AdaptiveController's own fps_initial — raised from 3.0 to 10.0 on 2026-07-06, still
+            // below this GUI-only value): requested specifically for GUI use, paired with the lower
+            // 640x480 resolution default and WeChatQRCode below. Still just the pre-filled text of
+            // an editable field, not a code-level change to the safe handshake-survives-camera-
+            // settling starting point documented in AdaptiveConfig.
             mk(L"EDIT", L"30", WS_BORDER | ES_AUTOHSCROLL, 220, 77, 50, 22, IDC_FPS_EDIT);
             mk(L"STATIC", L"Ris. (LxA):", 0, 285, 80, 85, 20, 0);
             // 640x480 (2026-07-05) — matches OpticalLinkConfig::camera_width/height, the
@@ -263,15 +264,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             CheckDlgButton(hwnd, IDC_CONTRAST_CHECK, BST_CHECKED);
 
             mk(L"STATIC", L"Chunk max:", 0, 10, 150, 100, 20, 0);
-            // Opt-in override for AdaptiveConfig::chunk_size_max (default 1024, unchanged) — the
-            // AIMD's ceiling on how many bytes of file payload a single DATA frame/QR code is
-            // allowed to grow to. Higher packs more bytes per QR (fewer QR codes per file) at the
-            // cost of a higher QR version (larger, more finely-detailed codes, more sensitive to
-            // camera resolution/focus/distance); lower does the opposite. Safe regardless of value
-            // — upshift() also caps growth by what the current EC level can actually encode, so
-            // this alone can't ask for a payload too large to fit any QR version. Must match on
-            // both sides of the transfer.
-            mk(L"EDIT", L"1024", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 130, 147, 60, 22, IDC_CHUNKMAX_EDIT);
+            // Opt-in override for AdaptiveConfig::chunk_size_max — the AIMD's ceiling on how many
+            // bytes of file payload a single DATA frame/QR code is allowed to grow to. Higher packs
+            // more bytes per QR (fewer QR codes per file) at the cost of a higher QR version
+            // (larger, more finely-detailed codes, more sensitive to camera resolution/focus/
+            // distance); lower does the opposite. Safe regardless of value — upshift() also caps
+            // growth by what the current EC level can actually encode, so this alone can't ask for
+            // a payload too large to fit any QR version. Must match on both sides of the transfer.
+            // 1024 -> 180 (2026-07-06), explicit user request, matching the new library/CLI default
+            // (AdaptiveConfig::chunk_size_max/chunk_size_initial) — paired with the fps field's own
+            // ramp-up now starting from a faster base too.
+            mk(L"EDIT", L"180", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 130, 147, 60, 22, IDC_CHUNKMAX_EDIT);
 
             mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 186, 100, 28, IDC_START_BTN);
             HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 186, 100, 28, IDC_STOP_BTN);
