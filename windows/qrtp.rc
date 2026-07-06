@@ -1,0 +1,6 @@
+// Windows resource script for qrtp_gui.exe — embeds the app icon so it shows in the title bar,
+// taskbar, Explorer, and any shortcut (installer.iss's [Icons] entries just point at the .exe
+// itself, so they pick this up automatically with no changes needed there).
+#include "resource.h"
+
+IDI_APP_ICON ICON "icon/qrtp.ico"

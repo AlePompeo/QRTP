@@ -687,3 +687,57 @@ refreshed. **Not yet verified end-to-end on real hardware** — same standing ca
 change touching the optical layer in this log; a real two-PC broadcast/listen run is the next
 confirmation needed, especially around whether the fixed `ec_level=Q`/`chunk_size=180`/`fps=10`
 defaults hold up without any ARQ safety net to fall back on.
+
+## GUI reorganized into labeled groups, fixed 3fps for unidirezionale, qr_codes_per_frame incompatibility fixed, app icon added (2026-07-06, same day)
+
+User reported the GUI was getting cluttered after the broadcast-mode checkbox/Loop field were
+bolted onto the existing flat layout, and asked for two things: reorganize it so it's clear which
+parameters belong to bidirezionale vs unidirezionale, and hard-code unidirezionale's fps to a fixed
+3 (down from whatever the shared FPS field held).
+
+**Layout (`src/gui_win32.cpp`)**: replaced the single "Modalità unidirezionale" checkbox with a
+proper second radio-button pair ("Bidirezionale (TCP-like)" / "Unidirezionale (broadcast)",
+mutually exclusive via its own `WS_GROUP`, independent of the existing Invia/Ricevi role group) and
+reorganized every control into five `BS_GROUPBOX`-framed sections: **Ruolo e modalità** (role +
+mode, with an inline hint explaining the fps/no-reply difference), **File**, **Fotocamera** (camera
+index/resolution/MJPEG/autofocus/WeChatQRCode/contrast — genuinely shared by both modes, since
+they're about capture, not protocol), and two side-by-side mode-specific groups —
+**Bidirezionale** (FPS iniziale, QR per frame, Chunk max — the AIMD-adapted values) and
+**Unidirezionale** (FPS fisso, Chunk, Loop — no AIMD, all fixed for the whole broadcast). A new
+`UpdateModeUI()` grays out whichever mode-specific group doesn't apply, called once at creation and
+again on every mode-radio click. Window grown from 501 to 660px tall to fit the reorganized layout.
+
+**Fixed 3fps for unidirezionale**: the Unidirezionale group's own FPS field (`IDC_FPS_BROADCAST_EDIT`)
+is permanently `WS_DISABLED`, always showing "3" — purely so the fixed value is visible rather than
+implicit. The `IDC_START_BTN` handler now sets `fps = 3.0` unconditionally whenever Unidirezionale
+is selected, never reading the (disabled) field at all.
+
+**Found and fixed a real incompatibility while separating the mode-specific groups**:
+`qr_codes_per_frame` (multi-QR-per-frame batching, `OpticalLinkConfig`) turns out to be fundamentally
+incompatible with the broadcast/listen path — `BroadcastSender` never calls `try_receive()`, so a
+partial batch that never reaches `qr_codes_per_frame` would sit in `pending_send_batch_` forever,
+since nothing on the send-only side ever triggers `try_receive_multi()`'s flush-on-stall logic (see
+the 2026-07-06 SACK/multi-QR entry above). Fixed at the source in both places this could be reached:
+the GUI now forces `qr_grid = 1` whenever Unidirezionale is selected (its own field lives only in
+the Bidirezionale group and is disabled otherwise), and `cmd_broadcast_optical`/`cmd_listen_optical`
+(`main.cpp`) now force `ocfg.qr_codes_per_frame = 1` unconditionally, regardless of `--qr-grid` —
+documented in the CLI's own `--qr-grid` help text rather than silently ignored.
+
+**App icon**: user asked for "a nice icon" while the layout was being redone. Generated a
+256x256 source (indigo rounded-square app-icon background, a classic QR-code finder-pattern motif
+in a white inset card, scattered data-module texture, one small coral accent dot) with Python/
+Pillow, exported as a multi-resolution `.ico` (16 through 256px) to `windows/icon/qrtp.ico`. Wired
+in via a new `windows/qrtp.rc` + `windows/resource.h` (`IDI_APP_ICON`), compiled through MinGW's
+`windres` (`CMAKE_RC_COMPILER`, already set by `cmake/toolchain-mingw64.cmake`; `enable_language(RC)`
+added to `CMakeLists.txt`), and linked into the `qrtp_gui` target. `gui_win32.cpp`'s `WNDCLASSEXW`
+now sets `hIcon`/`hIconSm` via `LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON))`, so it shows in
+the title bar, taskbar, and Alt-Tab — `windows/installer.iss`'s shortcuts already point at the .exe
+itself, so they pick it up with no changes needed there. Confirmed present via
+`objdump -h qrtp_gui.exe` showing a `.rsrc` section sized to match the embedded icon.
+
+**Verified**: `make test` (native), a full clean reconfigure + rebuild of the MinGW cross-compile
+from scratch (`rm -rf build-win/* && cmake -B ... && cmake --build ...`) with zero warnings,
+`dist-windows.zip` refreshed. Icon legibility checked visually at 16/24/32/48/64/128px (all remain
+clearly recognizable as a QR code). **GUI layout/behavior not verified interactively on a real
+Windows machine** — same standing caveat as every other GUI change in this log; no Windows display
+available in this dev environment to actually click through the reorganized controls.

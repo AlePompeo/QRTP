@@ -101,7 +101,9 @@ void print_usage() {
         "      directly improves the odds each individual read succeeds) are both fixed for the\n"
         "      whole broadcast, unlike the AIMD-adapted values `send`/`receive` use. Same\n"
         "      --camera/--width/--height/--no-mjpeg/--lock-focus/--no-wechat-qrcode/\n"
-        "      --no-contrast-boost/--wechat-model-dir flags as `send`.\n\n"
+        "      --no-contrast-boost/--wechat-model-dir flags as `send`. --qr-grid is accepted but\n"
+        "      always forced to 1: multi-QR-per-frame batching needs a listener to trigger each\n"
+        "      flush, which this send-only mode never does.\n\n"
         "  qrtp listen --out <dir> [--camera N] [--fps F] [--chunk-size N] [--ec-level L|M|Q|H]\n"
         "                         [--timeout SECONDS] [--width W --height H] [--no-mjpeg]\n"
         "                         [--lock-focus] [--no-wechat-qrcode] [--no-contrast-boost] [...]\n"
@@ -299,6 +301,12 @@ int cmd_broadcast_optical(int argc, char** argv) {
     try {
         ocfg.fps = bcfg.fps; // only affects OpticalLink's initial "camera opened: ..." log context —
                               // send_file() below overrides it immediately via set_fps().
+        // Multi-QR-per-frame batching (--qr-grid, parsed by parse_camera_flag above) isn't
+        // compatible with this mode: BroadcastSender never calls try_receive(), so a batch that
+        // didn't fill to qr_codes_per_frame would never get flushed to screen at all (see
+        // OpticalLink::try_receive_multi()'s flush-on-poll logic, never reached here). Forced to 1
+        // regardless of what was passed.
+        ocfg.qr_codes_per_frame = 1;
         bcfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
         ocfg.log = bcfg.log;
         qrtp::OpticalLink link(ocfg);
@@ -328,6 +336,7 @@ int cmd_listen_optical(int argc, char** argv) {
     }
     try {
         ocfg.fps = bcfg.fps;
+        ocfg.qr_codes_per_frame = 1; // see cmd_broadcast_optical's own comment on this
         bcfg.log = [](const std::string& m) { std::printf("[qrtp] %s\n", m.c_str()); };
         ocfg.log = bcfg.log;
         qrtp::OpticalLink link(ocfg);

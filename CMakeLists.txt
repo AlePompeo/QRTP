@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 project(qrtp LANGUAGES CXX)
 
+# Only needed for qrtp_gui.exe's embedded icon (windows/qrtp.rc) — RC is a no-op non-issue on
+# non-Windows configurations, since that target itself is gated behind WIN32 below, but the
+# compiler needs to be known before any target references an .rc source file.
+if(WIN32)
+    enable_language(RC)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -72,7 +79,8 @@ add_test(NAME qrtp_tests COMMAND qrtp_tests)
 # executable (no console window). Statically linking the runtime keeps it a single portable .exe
 # with no "Visual C++ Redistributable" needed on the target machine.
 if(WIN32 AND WITH_OPENCV)
-    add_executable(qrtp_gui WIN32 src/gui_win32.cpp)
+    add_executable(qrtp_gui WIN32 src/gui_win32.cpp windows/qrtp.rc)
+    target_include_directories(qrtp_gui PRIVATE windows) # resource.h, shared with qrtp.rc
     target_link_libraries(qrtp_gui PRIVATE qrtp_core comdlg32 shell32 ole32)
     set_property(TARGET qrtp_gui PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     if(MINGW)

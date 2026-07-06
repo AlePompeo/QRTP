@@ -31,6 +31,8 @@
 #include "qrtp/optical_link.hpp"
 #include "qrtp/protocol.hpp"
 
+#include "resource.h" // IDI_APP_ICON — shared with windows/qrtp.rc
+
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -55,8 +57,11 @@ constexpr int IDC_FOCUS_CHECK = 114;
 constexpr int IDC_WECHAT_CHECK = 115;
 constexpr int IDC_CHUNKMAX_EDIT = 116;
 constexpr int IDC_CONTRAST_CHECK = 117;
-constexpr int IDC_BROADCAST_CHECK = 118;
 constexpr int IDC_LOOPS_EDIT = 119;
+constexpr int IDC_RADIO_BIDIRECTIONAL = 120;
+constexpr int IDC_RADIO_BROADCAST = 121;
+constexpr int IDC_FPS_BROADCAST_EDIT = 122; // always disabled — purely shows the fixed value used
+constexpr int IDC_CHUNKSIZE_EDIT = 123;     // unidirezionale's own chunk-size field
 
 // Custom messages posted from the worker thread to the UI thread. Never touch a control directly
 // from the worker thread — Win32 windows are single-threaded-affine, all updates must happen here.
@@ -218,6 +223,19 @@ void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_in
     }
 }
 
+// Grays out whichever mode-specific parameter group doesn't apply to the currently-selected mode
+// (see the "Bidirezionale"/"Unidirezionale" groups in WM_CREATE) — called once at window creation
+// and again every time the mode radio buttons change. IDC_FPS_BROADCAST_EDIT is never touched
+// here: it's permanently disabled (WS_DISABLED at creation), purely displaying the fixed value.
+void UpdateModeUI(HWND hwnd) {
+    const bool broadcast = IsDlgButtonChecked(hwnd, IDC_RADIO_BROADCAST) == BST_CHECKED;
+    EnableWindow(GetDlgItem(hwnd, IDC_FPS_EDIT), !broadcast);
+    EnableWindow(GetDlgItem(hwnd, IDC_QRGRID_EDIT), !broadcast);
+    EnableWindow(GetDlgItem(hwnd, IDC_CHUNKMAX_EDIT), !broadcast);
+    EnableWindow(GetDlgItem(hwnd, IDC_CHUNKSIZE_EDIT), broadcast);
+    EnableWindow(GetDlgItem(hwnd, IDC_LOOPS_EDIT), broadcast);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static AppState* app = nullptr;
 
@@ -235,113 +253,128 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return c;
             };
 
-            mk(L"BUTTON", L"Invia file", BS_AUTORADIOBUTTON | WS_GROUP, 10, 10, 150, 20, IDC_RADIO_SEND);
-            mk(L"BUTTON", L"Ricevi file", BS_AUTORADIOBUTTON, 170, 10, 150, 20, IDC_RADIO_RECEIVE);
+            // --- Group 1: ruolo (invia/ricevi) + modalità (bidirezionale/unidirezionale) ---
+            // Two independent choices, each its own radio-button group (WS_GROUP starts a new
+            // group; every following button until the next WS_GROUP joins it) — grouped together
+            // visually since both must be picked before starting a transfer.
+            mk(L"BUTTON", L"Ruolo e modalità", BS_GROUPBOX, 10, 5, 495, 80, 0);
+            mk(L"BUTTON", L"Invia file", BS_AUTORADIOBUTTON | WS_GROUP, 25, 24, 110, 18, IDC_RADIO_SEND);
+            mk(L"BUTTON", L"Ricevi file", BS_AUTORADIOBUTTON, 145, 24, 110, 18, IDC_RADIO_RECEIVE);
             CheckDlgButton(hwnd, IDC_RADIO_SEND, BST_CHECKED);
+            // Bidirezionale (default): the existing ARQ/AIMD-driven Sender/Receiver (protocol.hpp).
+            // Unidirezionale: BroadcastSender/BroadcastReceiver (broadcast.hpp) — no return channel
+            // at all, reliability from looping the whole file instead of retransmission. See
+            // RunTransfer and UpdateModeUI (below) for how each field's availability follows this.
+            mk(L"BUTTON", L"Bidirezionale (TCP-like)", BS_AUTORADIOBUTTON | WS_GROUP, 25, 46, 190, 18,
+               IDC_RADIO_BIDIRECTIONAL);
+            mk(L"BUTTON", L"Unidirezionale (broadcast)", BS_AUTORADIOBUTTON, 225, 46, 220, 18,
+               IDC_RADIO_BROADCAST);
+            CheckDlgButton(hwnd, IDC_RADIO_BIDIRECTIONAL, BST_CHECKED);
+            mk(L"STATIC", L"In unidirezionale il ricevitore non risponde mai; FPS è fisso a 3.", 0, 25, 66, 460, 14,
+               0);
 
-            // Unchecked by default: the existing bidirectional (TCP-like) protocol stays the
-            // default behavior. Checked, this coexists as a completely separate mode — one-way
-            // (simplex) transfer with no return channel at all (BroadcastSender/BroadcastReceiver,
-            // broadcast.hpp) instead of the ARQ/AIMD-driven Sender/Receiver above. See RunTransfer.
-            mk(L"BUTTON", L"Modalità unidirezionale (broadcast)", BS_AUTOCHECKBOX, 10, 33, 300, 20,
-               IDC_BROADCAST_CHECK);
+            // --- Group 2: file/cartella (comune a entrambe le modalità) ---
+            mk(L"BUTTON", L"File", BS_GROUPBOX, 10, 92, 495, 45, 0);
+            mk(L"STATIC", L"File / cartella:", 0, 20, 110, 95, 18, 0);
+            mk(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 120, 108, 280, 22, IDC_PATH_EDIT);
+            mk(L"BUTTON", L"Sfoglia...", BS_PUSHBUTTON, 405, 108, 90, 22, IDC_BROWSE_BTN);
 
-            mk(L"STATIC", L"File / cartella:", 0, 10, 68, 100, 20, 0);
-            mk(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 110, 65, 290, 22, IDC_PATH_EDIT);
-            mk(L"BUTTON", L"Sfoglia...", BS_PUSHBUTTON, 405, 65, 90, 22, IDC_BROWSE_BTN);
-
-            mk(L"STATIC", L"Indice camera:", 0, 10, 103, 100, 20, 0);
-            mk(L"EDIT", L"0", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 110, 100, 50, 22, IDC_CAMERA_EDIT);
-            mk(L"STATIC", L"FPS:", 0, 175, 103, 40, 20, 0);
-            // GUI-only default of 30 (2026-07-05) — deliberately higher than the library/CLI
-            // default (OpticalLinkConfig::fps, still used by `qrtp send`/`qrtp receive` and as the
-            // AdaptiveController's own fps_initial — raised from 3.0 to 10.0 on 2026-07-06, still
-            // below this GUI-only value): requested specifically for GUI use, paired with the lower
-            // 640x480 resolution default and WeChatQRCode below. Still just the pre-filled text of
-            // an editable field, not a code-level change to the safe handshake-survives-camera-
-            // settling starting point documented in AdaptiveConfig. Also the fixed fps used by the
-            // unidirezionale/broadcast mode above, if checked (BroadcastConfig has no AIMD to ramp
-            // this from — it's used exactly as entered here for the whole broadcast).
-            mk(L"EDIT", L"30", WS_BORDER | ES_AUTOHSCROLL, 220, 100, 50, 22, IDC_FPS_EDIT);
-            mk(L"STATIC", L"Ris. (LxA):", 0, 285, 103, 85, 20, 0);
+            // --- Group 3: parametri fotocamera, comuni a entrambe le modalità (riguardano solo la
+            // cattura/visualizzazione ottica, non il protocollo) ---
+            mk(L"BUTTON", L"Fotocamera (comune a entrambe le modalità)", BS_GROUPBOX, 10, 142, 495, 96, 0);
+            mk(L"STATIC", L"Indice camera:", 0, 20, 160, 95, 18, 0);
+            mk(L"EDIT", L"0", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 118, 157, 50, 22, IDC_CAMERA_EDIT);
+            mk(L"STATIC", L"Ris. (LxA):", 0, 180, 160, 90, 18, 0);
             // 640x480 (2026-07-05) — matches OpticalLinkConfig::camera_width/height, the
-            // library/CLI default too (paired with WeChatQRCode below; only the 30fps default
-            // above is GUI-only). Still fully editable per machine: type "max" to opt back into
+            // library/CLI default too. Fully editable per machine: type "max" to opt back into
             // auto-detection, "0x0" to skip any request and leave the camera fully alone, or any
             // other specific WxH.
-            mk(L"EDIT", L"640x480", WS_BORDER | ES_AUTOHSCROLL, 375, 100, 100, 22, IDC_RES_EDIT);
-
-            mk(L"STATIC", L"QR per frame:", 0, 10, 129, 100, 20, 0);
-            // Classic default "1" — exactly the original single-QR-at-a-time behavior. >1 is the
-            // experimental multi-QR-per-frame mode (see OpticalLinkConfig::qr_codes_per_frame): a
-            // runtime toggle, not a hard swap, specifically so it can be set back to 1 without
-            // needing a rebuild if it doesn't hold up on real hardware. Must match on both machines.
-            // Not used by the unidirezionale/broadcast mode above (it has no such batching).
-            mk(L"EDIT", L"1", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 130, 126, 50, 22, IDC_QRGRID_EDIT);
-
+            mk(L"EDIT", L"640x480", WS_BORDER | ES_AUTOHSCROLL, 275, 157, 90, 22, IDC_RES_EDIT);
             // Checked by default (see OpticalLinkConfig::request_mjpeg): a direct A/B on real
             // hardware confirmed raw capture costing ~100x more per frame than MJPEG on this
             // machine, with no measurable reliability benefit from turning it off. Still a runtime
             // toggle, not hard-coded, since a specific camera could still disagree — must match on
             // both sides of the transfer.
-            mk(L"BUTTON", L"Richiedi MJPEG", BS_AUTOCHECKBOX, 200, 127, 160, 20, IDC_MJPEG_CHECK);
+            mk(L"BUTTON", L"Richiedi MJPEG", BS_AUTOCHECKBOX, 20, 184, 160, 18, IDC_MJPEG_CHECK);
             CheckDlgButton(hwnd, IDC_MJPEG_CHECK, BST_CHECKED);
-
             // Unchecked by default (see OpticalLinkConfig::disable_autofocus): untested on real
             // hardware, unlike the MJPEG checkbox above which reflects a confirmed A/B result.
-            // Offered as the next experiment for the still-open avg_capture_ms/avg_decode_ms
-            // correlation-with-fps question (not_working.md, 2026-07-05) — autofocus hunting under
-            // fast-changing on-screen content is a candidate, not a confirmed fix.
-            mk(L"BUTTON", L"Blocca autofocus", BS_AUTOCHECKBOX, 10, 150, 160, 20, IDC_FOCUS_CHECK);
-
+            mk(L"BUTTON", L"Blocca autofocus", BS_AUTOCHECKBOX, 200, 184, 160, 18, IDC_FOCUS_CHECK);
             // Checked by default (2026-07-05) — matches OpticalLinkConfig::use_wechat_qrcode, the
             // library/CLI default too, though still not verified end-to-end on real camera
             // hardware. Needs detect.prototxt/detect.caffemodel/sr.prototxt/sr.caffemodel in a
-            // "models/wechat_qrcode" folder next to this executable — see models/wechat_qrcode/
-            // LICENSE. Must match on both sides of the transfer.
-            mk(L"BUTTON", L"Usa WeChatQRCode (CNN)", BS_AUTOCHECKBOX, 200, 150, 200, 20, IDC_WECHAT_CHECK);
+            // "models/wechat_qrcode" folder next to this executable. Must match on both sides.
+            mk(L"BUTTON", L"Usa WeChatQRCode (CNN)", BS_AUTOCHECKBOX, 20, 206, 220, 18, IDC_WECHAT_CHECK);
             CheckDlgButton(hwnd, IDC_WECHAT_CHECK, BST_CHECKED);
-
             // Checked by default (see OpticalLinkConfig::enhance_camera_contrast) — requests higher
             // camera contrast and zero saturation, aimed at the washed-out/low-contrast captures
             // that trip up a QR decoder; still a runtime toggle in case a specific camera's default
             // contrast is already well-tuned.
-            mk(L"BUTTON", L"Migliora contrasto fotocamera", BS_AUTOCHECKBOX, 200, 172, 260, 20, IDC_CONTRAST_CHECK);
+            mk(L"BUTTON", L"Migliora contrasto fotocamera", BS_AUTOCHECKBOX, 250, 206, 240, 18, IDC_CONTRAST_CHECK);
             CheckDlgButton(hwnd, IDC_CONTRAST_CHECK, BST_CHECKED);
 
-            mk(L"STATIC", L"Chunk max:", 0, 10, 173, 100, 20, 0);
+            // --- Group 4: parametri specifici della modalità bidirezionale (grigi/disabilitati
+            // quando è selezionata Unidirezionale — vedi UpdateModeUI) ---
+            mk(L"BUTTON", L"Bidirezionale (TCP-like)", BS_GROUPBOX, 10, 248, 240, 100, 0);
+            mk(L"STATIC", L"FPS iniziale:", 0, 20, 268, 85, 18, 0);
+            // GUI-only default of 30 (2026-07-05) — deliberately higher than the library/CLI
+            // default (OpticalLinkConfig::fps/AdaptiveConfig::fps_initial, 10.0 as of 2026-07-06):
+            // requested specifically for GUI use, paired with the lower 640x480 resolution default
+            // and WeChatQRCode. Just the AIMD's *starting* point, not a fixed value — it ramps from
+            // here. Unlike the fixed FPS in the Unidirezionale group to the right, this field is
+            // only used when Bidirezionale is selected.
+            mk(L"EDIT", L"30", WS_BORDER | ES_AUTOHSCROLL, 110, 265, 50, 22, IDC_FPS_EDIT);
+            mk(L"STATIC", L"QR per frame:", 0, 20, 292, 85, 18, 0);
+            // Classic default "1" — exactly the original single-QR-at-a-time behavior. >1 is the
+            // experimental multi-QR-per-frame mode (see OpticalLinkConfig::qr_codes_per_frame): a
+            // runtime toggle, not a hard swap, specifically so it can be set back to 1 without
+            // needing a rebuild if it doesn't hold up on real hardware. Must match on both machines.
+            // Not compatible with Unidirezionale (the broadcast sender never listens for anything,
+            // so a batch that didn't fill would never get flushed to screen at all) — forced to 1
+            // and disabled whenever that mode is selected, see UpdateModeUI/IDC_START_BTN handling.
+            mk(L"EDIT", L"1", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 110, 289, 50, 22, IDC_QRGRID_EDIT);
+            mk(L"STATIC", L"Chunk max (byte):", 0, 20, 316, 100, 18, 0);
             // Opt-in override for AdaptiveConfig::chunk_size_max — the AIMD's ceiling on how many
             // bytes of file payload a single DATA frame/QR code is allowed to grow to. Higher packs
             // more bytes per QR (fewer QR codes per file) at the cost of a higher QR version
             // (larger, more finely-detailed codes, more sensitive to camera resolution/focus/
             // distance); lower does the opposite. Safe regardless of value — upshift() also caps
-            // growth by what the current EC level can actually encode, so this alone can't ask for
-            // a payload too large to fit any QR version. Must match on both sides of the transfer.
-            // 1024 -> 180 (2026-07-06), explicit user request, matching the new library/CLI default
-            // (AdaptiveConfig::chunk_size_max/chunk_size_initial) — paired with the fps field's own
-            // ramp-up now starting from a faster base too. Reused as-is by the unidirezionale/
-            // broadcast mode above as its fixed (not AIMD-ceiling) chunk size — same field, same
-            // "bytes of file payload per QR" meaning either way.
-            mk(L"EDIT", L"180", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 130, 170, 60, 22, IDC_CHUNKMAX_EDIT);
+            // growth by what the current EC level can actually encode. Must match on both sides.
+            mk(L"EDIT", L"180", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 125, 313, 60, 22, IDC_CHUNKMAX_EDIT);
 
-            mk(L"STATIC", L"Loop (0=infinito):", 0, 10, 196, 130, 20, 0);
-            // Only meaningful for the unidirezionale/broadcast mode above (BroadcastConfig::loops)
-            // — ignored otherwise. 0 loops the whole file indefinitely until "Ferma" is pressed, a
-            // natural default for a continuous broadcast with no return channel to ever signal
-            // "the receiver has everything, stop."
-            mk(L"EDIT", L"0", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 145, 193, 60, 22, IDC_LOOPS_EDIT);
+            // --- Group 5: parametri specifici della modalità unidirezionale (grigi/disabilitati
+            // quando è selezionata Bidirezionale — vedi UpdateModeUI) ---
+            mk(L"BUTTON", L"Unidirezionale (broadcast)", BS_GROUPBOX, 260, 248, 245, 100, 0);
+            mk(L"STATIC", L"FPS (fisso):", 0, 270, 268, 75, 18, 0);
+            // Always disabled (WS_DISABLED below) — this mode has no AIMD to adapt fps from (no
+            // feedback channel to adapt on at all), so per explicit user request it's a hard-coded
+            // 3.0 the GUI enforces itself (IDC_START_BTN handler), not something read from here at
+            // all. Shown, not editable, purely so the fixed value is visible rather than silently
+            // implicit.
+            mk(L"EDIT", L"3", WS_BORDER | WS_DISABLED, 350, 265, 45, 22, IDC_FPS_BROADCAST_EDIT);
+            mk(L"STATIC", L"Chunk (byte):", 0, 270, 292, 85, 18, 0);
+            // Same "bytes of file payload per QR" meaning as the Bidirezionale group's own Chunk
+            // max field, just a separate control (own default 180) so switching modes never leaves
+            // an ambiguous shared value on screen.
+            mk(L"EDIT", L"180", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 360, 289, 60, 22, IDC_CHUNKSIZE_EDIT);
+            mk(L"STATIC", L"Loop (0=infinito):", 0, 270, 316, 100, 18, 0);
+            // BroadcastConfig::loops — 0 (default) loops the whole file indefinitely until "Ferma"
+            // is pressed, the natural default for a continuous broadcast with no return channel to
+            // ever signal "the receiver has everything, stop."
+            mk(L"EDIT", L"0", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 375, 313, 50, 22, IDC_LOOPS_EDIT);
 
-            mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 232, 100, 28, IDC_START_BTN);
-            HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 232, 100, 28, IDC_STOP_BTN);
+            mk(L"BUTTON", L"Avvia", BS_PUSHBUTTON, 10, 358, 100, 28, IDC_START_BTN);
+            HWND stop = mk(L"BUTTON", L"Ferma", BS_PUSHBUTTON, 120, 358, 100, 28, IDC_STOP_BTN);
             EnableWindow(stop, FALSE);
-            mk(L"STATIC", L"Pronto.", 0, 235, 237, 260, 20, IDC_STATUS_STATIC);
+            mk(L"STATIC", L"Pronto.", 0, 235, 363, 260, 20, IDC_STATUS_STATIC);
 
             HWND log_edit = mk(L"EDIT", L"",
-                                WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 272, 485,
+                                WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 394, 485,
                                 220, IDC_LOG_EDIT);
             // Default EDIT control limit is ~32K characters; past that it silently stops accepting
             // more text. 0 asks for the implementation's own maximum instead of a fixed number.
             SendMessageW(log_edit, EM_LIMITTEXT, 0, 0);
+            UpdateModeUI(hwnd); // matches the default Bidirezionale selection above
             return 0;
         }
 
@@ -351,6 +384,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 bool is_send = IsDlgButtonChecked(hwnd, IDC_RADIO_SEND) == BST_CHECKED;
                 std::wstring picked = is_send ? BrowseForFile(hwnd) : BrowseForFolder(hwnd);
                 if (!picked.empty()) SetDlgItemTextW(hwnd, IDC_PATH_EDIT, picked.c_str());
+            } else if (id == IDC_RADIO_BIDIRECTIONAL || id == IDC_RADIO_BROADCAST) {
+                UpdateModeUI(hwnd);
             } else if (id == IDC_START_BTN) {
                 if (app->running.load()) break;
 
@@ -396,10 +431,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 bool disable_autofocus = IsDlgButtonChecked(hwnd, IDC_FOCUS_CHECK) == BST_CHECKED;
                 bool use_wechat_qrcode = IsDlgButtonChecked(hwnd, IDC_WECHAT_CHECK) == BST_CHECKED;
                 bool enhance_contrast = IsDlgButtonChecked(hwnd, IDC_CONTRAST_CHECK) == BST_CHECKED;
-                UINT chunk_max = GetDlgItemInt(hwnd, IDC_CHUNKMAX_EDIT, nullptr, FALSE);
+                bool broadcast_mode = IsDlgButtonChecked(hwnd, IDC_RADIO_BROADCAST) == BST_CHECKED;
+                UINT chunk_max = GetDlgItemInt(hwnd, broadcast_mode ? IDC_CHUNKSIZE_EDIT : IDC_CHUNKMAX_EDIT,
+                                                nullptr, FALSE);
                 if (chunk_max == 0) chunk_max = 180;
-                bool broadcast_mode = IsDlgButtonChecked(hwnd, IDC_BROADCAST_CHECK) == BST_CHECKED;
                 int loops = static_cast<int>(GetDlgItemInt(hwnd, IDC_LOOPS_EDIT, nullptr, FALSE));
+
+                if (broadcast_mode) {
+                    // Fixed per explicit user request (2026-07-06) — BroadcastConfig has no AIMD
+                    // to ramp this from, so it's hard-coded here rather than read from IDC_FPS_EDIT
+                    // (that field belongs to the Bidirezionale group and is disabled in this mode).
+                    fps = 3.0;
+                    // Multi-QR-per-frame batching isn't compatible with the broadcast sender, which
+                    // never listens for anything: a batch that didn't fill would never get flushed
+                    // to screen at all (see OpticalLink::try_receive_multi()'s flush-on-poll logic
+                    // in optical_link.cpp, which the broadcast path never reaches). Forced to 1
+                    // regardless of IDC_QRGRID_EDIT's value (disabled in this mode anyway).
+                    qr_grid = 1;
+                }
 
                 SetWindowTextW(GetDlgItem(hwnd, IDC_LOG_EDIT), L"");
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), is_send ? L"Invio in corso..." : L"Ricezione in corso...");
@@ -470,14 +519,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     wc.lpszClassName = kClassName;
+    // Embedded via windows/qrtp.rc (IDI_APP_ICON, windows/resource.h) — shows in the title bar,
+    // taskbar, Alt-Tab, and Explorer; hIconSm specifically for the small title-bar/taskbar variant
+    // so it isn't just hIcon crudely downscaled.
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc);
 
     AppState app;
 
-    // Height grown from 501 (2026-07-06) to fit the new mode checkbox and "Loop" row for the
-    // unidirezionale/broadcast mode.
+    // Height grown from the original 501 (2026-07-06) to fit the reorganized layout: separate
+    // grouped sections for role/mode, file, shared camera parameters, and per-mode
+    // (bidirezionale/unidirezionale) parameters.
     HWND hwnd = CreateWindowExW(0, kClassName, L"QRTP — Trasferimento file via QR", WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
-                                 CW_USEDEFAULT, CW_USEDEFAULT, 520, 547, nullptr, nullptr, hInstance, &app);
+                                 CW_USEDEFAULT, CW_USEDEFAULT, 520, 660, nullptr, nullptr, hInstance, &app);
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 
