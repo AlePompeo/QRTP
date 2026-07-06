@@ -1695,6 +1695,23 @@ to the Makefile.
   fine for a loopback/LAN-speed test but untested against real camera-latency variance.
 - **No half-duplex fallback.** If only one machine has a working camera, there's currently no
   stop-and-wait mode — both sides need a monitor and a camera today.
+- **If a web port is ever needed: `qr-scanner-wechat` (antfu, npm) wraps the *same* WeChat
+  detector this project already uses.** Checked 2026-07-06 while comparing decode approaches —
+  it's OpenCV compiled to WebAssembly around the identical WeChat QR CNN (SSD detector +
+  super-resolution model) as `cv::wechat_qrcode::WeChatQRCode` (see `optical_link.cpp`), not a
+  different/competing algorithm. Concretely: the exact model files already bundled in
+  `models/wechat_qrcode/` (`detect.prototxt`/`.caffemodel`, `sr.prototxt`/`.caffemodel`) are the
+  same weights that library (or an equivalent custom WASM build from this project's own OpenCV
+  config) would need — nothing to re-source or retrain if a browser-based receiver is ever built.
+  Caveats worth knowing going in: it's decode-only (no equivalent on the encode/render/protocol
+  side, which is most of this project's actual complexity — ARQ, AIMD, framing, the broadcast
+  mode); its npm package was last published ~3 years ago (version 0.1.3), so treat it as a
+  reference/starting point rather than a drop-in current dependency; and the browser's
+  `getUserMedia` API exposes far less granular camera control (resolution, MJPEG, autofocus,
+  contrast/saturation) than `cv::VideoCapture` — exactly the knobs this project has spent real
+  effort tuning (see the 2026-07-05/06 camera-settings entries throughout this log and
+  PROGRESS.md), so a web port would likely need to re-litigate several of those same reliability
+  questions in a more constrained API.
 
 ## Anticipated failure modes to validate once the real optical link is tested against hardware
 
