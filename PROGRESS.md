@@ -741,3 +741,80 @@ from scratch (`rm -rf build-win/* && cmake -B ... && cmake --build ...`) with ze
 clearly recognizable as a QR code). **GUI layout/behavior not verified interactively on a real
 Windows machine** — same standing caveat as every other GUI change in this log; no Windows display
 available in this dev environment to actually click through the reorganized controls.
+
+## Native Linux build/test with real OpenCV, plus a new GTK3 GUI for Linux (2026-07-06, same day)
+
+User asked to close two remaining gaps: `WITH_OPENCV=1` had only ever been verified via MinGW
+cross-compile for Windows, never natively on Linux (no `opencv-devel` installed in this dev
+environment until now); and the GUI (`gui_win32.cpp`) only exists on Windows — no Linux
+equivalent. User installed `opencv-devel`/`gtk3-devel` (plus `xorg-x11-server-Xvfb`, not used in
+the end — see Verified below) after being asked; the rest of this entry happened without further
+back-and-forth once those were in place.
+
+**Native Linux build (`make WITH_OPENCV=1`)**: worked with **zero code changes** — confirms
+`optical_link.cpp`/`qr_encoder.cpp` really were already portable (Windows-specific branches
+already behind `#ifdef _WIN32`: `CAP_DSHOW` vs the default capture backend, `LoadLibrary` vs
+`dlopen`). Genuinely new information found while checking feasibility, before writing anything:
+Fedora's `opencv-devel` **already bundles `opencv_contrib`'s `wechat_qrcode` module**
+(`/usr/include/opencv4/opencv2/wechat_qrcode.hpp` + `.so` are part of the stock package) — unlike
+the MinGW Windows cross-compile, which needed a custom from-source OpenCV build specifically to
+get that module (see the 2026-07-05 MinGW entries). `./bin/qrtp send/receive/broadcast --camera 0`
+all correctly attempt to open `/dev/video0` via V4L2/GStreamer and fail with a clear
+`OpticalLink: cannot open camera index 0` when there isn't one — the real camera-open code path,
+genuinely exercised for the first time on any platform in this project (the Windows side could
+only ever be compile/link-verified, never actually *run*, since there's no way to execute a
+Windows `.exe` from this Linux dev machine).
+
+**New GTK3 Linux GUI (`src/gui_gtk.cpp`)**: chosen over Qt specifically because `gtk+-3.0` is in
+the package repositories of virtually every mainstream Linux distribution (Fedora `gtk3-devel`,
+Debian/Ubuntu `libgtk-3-dev`, Arch `gtk3`) without needing a heavier stack on non-KDE systems.
+Before writing it, extracted the toolkit-agnostic parts of `gui_win32.cpp`'s `RunTransfer` (build
+the right `OpticalLinkConfig`, dispatch to `Sender`/`Receiver` or
+`BroadcastSender`/`BroadcastReceiver`) into a new shared `include/qrtp/gui_common.hpp` +
+`src/gui_common.cpp` (`qrtp::GuiTransferParams` + `qrtp::RunGuiTransfer`, taking `log`/`done`
+callbacks instead of touching any toolkit's widgets directly) — `gui_win32.cpp`'s own `RunTransfer`
+is now a thin wrapper around it, and `gui_gtk.cpp` is the only other caller, so this logic exists
+in exactly one place instead of being copy-pasted into a second GUI from day one.
+
+`gui_gtk.cpp` mirrors `gui_win32.cpp`'s functional layout — role (Invia/Ricevi) and mode
+(Bidirezionale/Unidirezionale) radio groups, a File frame, a shared Fotocamera frame, and two
+side-by-side mode-specific frames (Bidirezionale: FPS iniziale/QR per frame/Chunk max;
+Unidirezionale: FPS fisso — permanently insensitive, always "3" — /Chunk/Loop), with the same
+`qr_grid` forced to 1 for Unidirezionale (same `try_receive_multi()` incompatibility noted in the
+2026-07-06 GUI-reorganization entry above) — but built with `GtkBox`/`GtkGrid`/`GtkFrame` instead
+of fixed pixel coordinates, so the window is naturally resizable rather than fixed-size like the
+Win32 one. Threading mirrors the Win32 version too: a `std::thread` worker, marshaling log/done
+back to the GTK main thread via `g_idle_add()` (GTK's equivalent of `PostMessageW`/`WM_APP_LOG` —
+the only thread-safe way to touch a widget from another thread). Window icon reuses the existing
+artwork (`windows/icon/qrtp_preview.png`, copied to `linux/icon/qrtp.png`, loaded via
+`gtk_window_set_icon_from_file()` from a path resolved next to the running executable via
+`/proc/self/exe` — same "next to the binary" convention `qr_encoder.cpp`'s `LoadLibrary` already
+uses — falling back to a repo-root-relative path for development runs). Added
+`linux/qrtp.desktop` for standard freedesktop.org application-menu integration, matching the level
+of care `windows/installer.iss` already gives the Windows side.
+
+**Build integration**: `src/gui_common.cpp` added to `QRTP_CORE_SOURCES` only under
+`WITH_OPENCV`/`WITH_OPENCV=1` (both `CMakeLists.txt` and `Makefile`, same conditional as
+`optical_link.cpp`). `qrtp_gui` on Linux is defined via `pkg_check_modules(GTK3 gtk+-3.0)` — **not**
+`REQUIRED**, specifically so a CLI-only build stays possible on a machine without GTK3 installed,
+printing a one-line diagnostic instead of failing the whole configure step. The `Makefile` gained a
+matching optional `bin/qrtp_gui` target (`pkg-config --cflags/--libs gtk+-3.0`), copying
+`linux/icon/qrtp.png` next to the built binary as part of the same rule.
+
+**Verified — further than any other GUI change in this project's history**: the user confirmed
+**the window actually appeared** on a real Linux desktop session available in this dev environment
+(`DISPLAY`/`WAYLAND_DISPLAY` were set) — a first for either GUI in this project; `gui_win32.cpp`
+has only ever been compile/link-verified, never actually run interactively. Also confirmed: `make
+clean && make WITH_OPENCV=1 && make test` (native Linux, real OpenCV, zero warnings beyond one
+pre-existing OpenCV-header-internal `-Woverloaded-virtual` unrelated to this project's own code),
+`make bin/qrtp_gui WITH_OPENCV=1` (zero warnings), and the process ran under a real `DISPLAY`
+without emitting any GTK-Warning/GTK-Critical messages to stderr. A programmatic screenshot
+(attempted via ImageMagick's `import`, then via PyGObject/`Gdk.pixbuf_get_from_window`) wasn't
+completed — `import` is blocked by this system's ImageMagick security policy (`coder` rights
+restricted to `{GIF,JPEG,PNG,WEBP}`, screen capture not in the allow-list) — superseded by the
+user's own direct visual confirmation, which is stronger evidence anyway. Full clean MinGW
+cross-compile rebuild also re-confirmed unaffected by the `CMakeLists.txt` changes (the new Linux
+block is gated behind `UNIX AND NOT APPLE`, never evaluated true when cross-compiling for
+Windows), `dist-windows.zip` refreshed. **Not yet tested with a real camera/optical transfer on
+Linux** — this session had no physical camera hardware, same standing limitation as every other
+platform this project targets.

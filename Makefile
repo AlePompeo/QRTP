@@ -17,7 +17,7 @@ CXXFLAGS_EXTRA :=
 LDLIBS_EXTRA :=
 
 ifeq ($(WITH_OPENCV),1)
-CORE_SRCS += optical_link.cpp
+CORE_SRCS += optical_link.cpp gui_common.cpp
 CXXFLAGS_EXTRA += -DQRTP_WITH_OPENCV $(shell pkg-config --cflags opencv4)
 LDLIBS_EXTRA += $(shell pkg-config --libs opencv4)
 endif
@@ -46,6 +46,23 @@ $(BUILD_DIR)/test_main.o: $(TEST_DIR)/test_main.cpp | $(BUILD_DIR)
 
 $(BUILD_DIR) $(BIN_DIR):
 	mkdir -p $@
+
+# Native GTK3 GUI for Linux (opt-in, like WITH_OPENCV itself: requires gtk3-devel/libgtk-3-dev/
+# gtk3 installed) — same role as the CMake-built qrtp_gui.exe on Windows, different toolkit.
+# `make bin/qrtp_gui WITH_OPENCV=1` builds it explicitly; not part of the default `all` target,
+# same as how the base CLI doesn't require GTK3 at all.
+ifeq ($(WITH_OPENCV),1)
+GTK_CFLAGS := $(shell pkg-config --cflags gtk+-3.0 2>/dev/null)
+GTK_LIBS := $(shell pkg-config --libs gtk+-3.0 2>/dev/null)
+
+$(BIN_DIR)/qrtp_gui: $(CORE_OBJS) $(BUILD_DIR)/gui_gtk.o | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS) $(LDLIBS_EXTRA) $(GTK_LIBS)
+	@mkdir -p $(BIN_DIR)/icon
+	@cp -f linux/icon/qrtp.png $(BIN_DIR)/icon/qrtp.png 2>/dev/null || true
+
+$(BUILD_DIR)/gui_gtk.o: $(SRC_DIR)/gui_gtk.cpp | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(GTK_CFLAGS) -c -o $@ $<
+endif
 
 test: $(BIN_DIR)/qrtp_tests
 	./$(BIN_DIR)/qrtp_tests

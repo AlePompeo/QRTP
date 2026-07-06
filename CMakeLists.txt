@@ -45,7 +45,7 @@ if(WITH_OPENCV)
         set(OpenCV_INCLUDE_DIRS "${CMAKE_FIND_ROOT_PATH}/include/opencv4")
         message(STATUS "Worked around broken OpenCV_INCLUDE_DIRS -> ${OpenCV_INCLUDE_DIRS}")
     endif()
-    list(APPEND QRTP_CORE_SOURCES src/optical_link.cpp)
+    list(APPEND QRTP_CORE_SOURCES src/optical_link.cpp src/gui_common.cpp)
 endif()
 
 add_library(qrtp_core STATIC ${QRTP_CORE_SOURCES})
@@ -89,5 +89,26 @@ if(WIN32 AND WITH_OPENCV)
         # the right startup automatically from whichever of WinMain/wWinMain is defined, so it
         # doesn't need this — this is a MinGW-specific linker requirement.
         target_link_options(qrtp_gui PRIVATE -municode)
+    endif()
+endif()
+
+# Native GTK3 GUI (qrtp_gui) for Linux — same role as the Win32 GUI above, different toolkit
+# (gtk+-3.0 is in the package repos of virtually every mainstream Linux distribution, unlike Qt on
+# non-KDE systems). Not REQUIRED: a CLI-only build (just `qrtp`) must keep working on a machine
+# without GTK3 installed, so this only adds the target if pkg-config actually finds it.
+if(UNIX AND NOT APPLE AND WITH_OPENCV)
+    find_package(PkgConfig)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(GTK3 gtk+-3.0)
+    endif()
+    if(GTK3_FOUND)
+        add_executable(qrtp_gui src/gui_gtk.cpp)
+        target_link_libraries(qrtp_gui PRIVATE qrtp_core ${GTK3_LIBRARIES})
+        target_include_directories(qrtp_gui PRIVATE ${GTK3_INCLUDE_DIRS})
+        target_compile_options(qrtp_gui PRIVATE ${GTK3_CFLAGS_OTHER})
+    else()
+        message(STATUS "gtk+-3.0 not found via pkg-config -- skipping qrtp_gui (qrtp, the CLI, "
+                        "still builds fine). Install gtk3-devel (Fedora), libgtk-3-dev "
+                        "(Debian/Ubuntu), or gtk3 (Arch) to enable it.")
     endif()
 endif()

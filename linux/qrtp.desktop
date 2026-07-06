@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=QRTP
+Comment=Trasferimento file via QR code (schermo + fotocamera, senza rete)
+Exec=qrtp_gui
+Icon=qrtp
+Terminal=false
+Categories=Network;FileTransfer;Utility;

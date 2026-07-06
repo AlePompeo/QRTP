@@ -27,9 +27,8 @@
 #include <string>
 #include <thread>
 
-#include "qrtp/broadcast.hpp"
+#include "qrtp/gui_common.hpp"
 #include "qrtp/optical_link.hpp"
-#include "qrtp/protocol.hpp"
 
 #include "resource.h" // IDI_APP_ICON — shared with windows/qrtp.rc
 
@@ -135,7 +134,10 @@ std::wstring BrowseForFolder(HWND owner) {
     return path;
 }
 
-// Runs on the worker thread. Never touches Win32 controls directly.
+// Runs on the worker thread. Never touches Win32 controls directly — marshals progress/
+// completion back to the UI thread via PostMessageW. The actual transfer logic (which
+// OpticalLink config to build, which protocol class to dispatch to) lives in
+// qrtp::RunGuiTransfer (gui_common.hpp), shared with the GTK Linux frontend (gui_gtk.cpp).
 void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_index, double fps, int camera_width,
                   int camera_height, int qr_grid, bool request_mjpeg, bool disable_autofocus,
                   bool use_wechat_qrcode, bool enhance_contrast, size_t chunk_max, bool broadcast_mode, int loops) {
@@ -149,78 +151,23 @@ void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_in
         PostMessageW(hwnd, WM_APP_DONE, success ? 1 : 0, reinterpret_cast<LPARAM>(copy));
     };
 
-    try {
-        qrtp::OpticalLinkConfig ocfg;
-        ocfg.camera_index = camera_index;
-        ocfg.fps = fps;
-        ocfg.camera_width = camera_width;
-        ocfg.camera_height = camera_height;
-        ocfg.qr_codes_per_frame = qr_grid;
-        ocfg.request_mjpeg = request_mjpeg;
-        ocfg.disable_autofocus = disable_autofocus;
-        ocfg.use_wechat_qrcode = use_wechat_qrcode;
-        ocfg.enhance_camera_contrast = enhance_contrast;
-        ocfg.log = post_log;
-        qrtp::OpticalLink link(ocfg);
+    qrtp::GuiTransferParams params;
+    params.is_send = is_send;
+    params.path = std::filesystem::path(path_w);
+    params.camera_index = camera_index;
+    params.fps = fps;
+    params.camera_width = camera_width;
+    params.camera_height = camera_height;
+    params.qr_grid = qr_grid;
+    params.request_mjpeg = request_mjpeg;
+    params.disable_autofocus = disable_autofocus;
+    params.use_wechat_qrcode = use_wechat_qrcode;
+    params.enhance_camera_contrast = enhance_contrast;
+    params.chunk_value = chunk_max;
+    params.broadcast_mode = broadcast_mode;
+    params.loops = loops;
 
-        // Unidirezionale (broadcast/listen): coexists with the bidirectional path below as a
-        // completely separate protocol — no ARQ/handshake, no AIMD, fixed fps/chunk size, reused
-        // straight from OpticalLinkConfig/the "Chunk max" field (which becomes a fixed chunk size
-        // rather than an AIMD ceiling in this mode).
-        if (broadcast_mode) {
-            qrtp::BroadcastConfig bcfg;
-            bcfg.fps = fps;
-            bcfg.chunk_size = chunk_max;
-            bcfg.loops = loops;
-            bcfg.cancel = &app->cancel;
-            bcfg.log = post_log;
-
-            if (is_send) {
-                qrtp::BroadcastSender sender(link, bcfg);
-                auto result = sender.send_file(std::filesystem::path(path_w));
-                post_done(result.success, result.message);
-            } else {
-                qrtp::BroadcastReceiver receiver(link, bcfg);
-                qrtp::TransferMetadata meta;
-                auto received = receiver.receive_file(meta, std::chrono::minutes(30));
-                if (!received) {
-                    post_done(false, app->cancel.load() ? "cancelled" : "listen failed (timeout or hash mismatch)");
-                    return;
-                }
-                auto out_path = std::filesystem::path(path_w) / meta.filename;
-                std::ofstream f(out_path, std::ios::binary);
-                f.write(reinterpret_cast<const char*>(received->data()),
-                        static_cast<std::streamsize>(received->size()));
-                post_done(true, "wrote " + std::to_string(received->size()) + " bytes to " + out_path.string());
-            }
-            return;
-        }
-
-        qrtp::ProtocolConfig cfg;
-        cfg.cancel = &app->cancel;
-        cfg.log = post_log;
-        cfg.adaptive.chunk_size_max = chunk_max;
-
-        if (is_send) {
-            qrtp::Sender sender(link, cfg);
-            auto result = sender.send_file(std::filesystem::path(path_w));
-            post_done(result.success, result.message);
-        } else {
-            qrtp::Receiver receiver(link, cfg);
-            qrtp::TransferMetadata meta;
-            auto received = receiver.receive_file(meta, std::chrono::minutes(30));
-            if (!received) {
-                post_done(false, app->cancel.load() ? "cancelled" : "receive failed (timeout or hash mismatch)");
-                return;
-            }
-            auto out_path = std::filesystem::path(path_w) / meta.filename;
-            std::ofstream f(out_path, std::ios::binary);
-            f.write(reinterpret_cast<const char*>(received->data()), static_cast<std::streamsize>(received->size()));
-            post_done(true, "wrote " + std::to_string(received->size()) + " bytes to " + out_path.string());
-        }
-    } catch (const std::exception& e) {
-        post_done(false, e.what());
-    }
+    qrtp::RunGuiTransfer(params, &app->cancel, post_log, post_done);
 }
 
 // Grays out whichever mode-specific parameter group doesn't apply to the currently-selected mode
