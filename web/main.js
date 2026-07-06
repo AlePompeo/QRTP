@@ -27,6 +27,16 @@ let lastSeenText = "";
 let lastReturnedText = "";
 let pendingWaiter = null; // { resolve, timer } | null
 
+// EXPERIMENTAL color-multiplex mode (see src/wasm_link.cpp's JsLink): up to 3 independent QR
+// codes in the R/G/B channels of one image instead of one QR per frame. Needs its own per-channel
+// de-dup state -- a channel repeating its content must not mask a *different* channel that
+// changed in the same tick, so this can't reuse the single lastSeenText/lastReturnedText pair
+// above.
+let colorMultiplexActive = false;
+const colorLastSeen = ["", "", ""];
+const colorLastReturned = ["", "", ""];
+let colorPendingWaiter = null; // { resolve, timer } | null
+
 function log(msg) {
   const el = $("logArea");
   el.value += msg + "\n";
@@ -44,6 +54,31 @@ function offerDecoded(text) {
     pendingWaiter = null;
     resolve(text);
   }
+}
+
+// Collects every channel whose current value differs from what was last returned -- not just
+// `channel`, so a waitForFrameColor() call picks up several channels that changed in the same
+// tick instead of needing to poll repeatedly to catch them one at a time.
+function collectNewColorChannels() {
+  const newly = [];
+  for (let c = 0; c < 3; c++) {
+    if (colorLastSeen[c] && colorLastSeen[c] !== colorLastReturned[c]) {
+      newly.push(colorLastSeen[c]);
+      colorLastReturned[c] = colorLastSeen[c];
+    }
+  }
+  return newly;
+}
+
+function offerDecodedColor(channel, text) {
+  colorLastSeen[channel] = text;
+  if (!colorPendingWaiter) return;
+  const newly = collectNewColorChannels();
+  if (newly.length === 0) return;
+  clearTimeout(colorPendingWaiter.timer);
+  const resolve = colorPendingWaiter.resolve;
+  colorPendingWaiter = null;
+  resolve(newly);
 }
 
 // Module.qrtpBridge: the JS-side implementation JsLink (src/wasm_link.cpp) calls into, via
@@ -83,6 +118,69 @@ const qrtpBridge = {
         resolve("");
       }, timeoutMs);
       pendingWaiter = { resolve, timer };
+    });
+  },
+
+  // EXPERIMENTAL color-multiplex counterpart to renderQr(): `channels` is an array of up to 3
+  // {width, modules} entries (R, G, B, in that fixed order; a missing/shorter one just leaves that
+  // color channel blank in its region). Builds the RGBA pixel buffer directly instead of using
+  // fillRect -- fillRect can't set just one color channel per pixel while leaving the others
+  // alone, which is exactly what overlaying 3 independent QR codes needs.
+  renderQrColor(channels) {
+    const canvas = $("qrCanvas");
+    const target = Math.floor(Math.min(window.innerWidth, 700) * 0.9);
+    if (canvas.width !== target) { canvas.width = target; canvas.height = target; }
+    const ctx = canvas.getContext("2d");
+    const quiet = 4;
+
+    const present = channels.filter((c) => c && c.width > 0);
+    const maxWidth = present.length ? Math.max(...present.map((c) => c.width)) : 1;
+    const side = maxWidth + 2 * quiet;
+    const scale = Math.max(1, Math.floor(canvas.width / side));
+    const pixSide = side * scale;
+    const gridOffset = Math.floor((canvas.width - pixSide) / 2);
+
+    const imgData = ctx.createImageData(canvas.width, canvas.height);
+    imgData.data.fill(255); // white background, full alpha (byte 3/7/11/... also 255, correct as-is)
+
+    for (let ch = 0; ch < 3; ch++) {
+      const info = channels[ch];
+      if (!info || !info.width) continue;
+      const w = info.width;
+      const modules = info.modules;
+      // Centers a channel that happens to be a smaller QR version than the widest one in this
+      // batch (AIMD could in principle have shifted between the 3 send() calls that filled it)
+      // within the shared grid, so all 3 channels still align pixel-for-pixel on screen.
+      const chOffset = Math.floor((maxWidth - w) / 2);
+      for (let y = 0; y < w; y++) {
+        for (let x = 0; x < w; x++) {
+          if (!modules[y * w + x]) continue; // light module -> leave this channel at 255 here
+          const px0 = gridOffset + (chOffset + x + quiet) * scale;
+          const py0 = gridOffset + (chOffset + y + quiet) * scale;
+          for (let dy = 0; dy < scale; dy++) {
+            for (let dx = 0; dx < scale; dx++) {
+              const idx = ((py0 + dy) * canvas.width + (px0 + dx)) * 4;
+              imgData.data[idx + ch] = 0; // dark module -> this channel's byte goes to 0
+            }
+          }
+        }
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  },
+
+  waitForFrameColor(timeoutMs) {
+    return new Promise((resolve) => {
+      const newly = collectNewColorChannels();
+      if (newly.length > 0) {
+        resolve(newly);
+        return;
+      }
+      const timer = setTimeout(() => {
+        colorPendingWaiter = null;
+        resolve([]);
+      }, timeoutMs);
+      colorPendingWaiter = { resolve, timer };
     });
   },
 
@@ -190,16 +288,21 @@ async function startCamera(deviceId) {
         // here would read garbage (or an out-of-bounds pointer) in a completely separate memory.
         const ptr = DecodeModule._malloc(frame.data.length);
         DecodeModule.HEAPU8.set(frame.data, ptr);
-        let text = "";
         try {
-          // decodeQrRgba is a plain synchronous C++ function, but Asyncify wraps every
-          // embind-bound function to return a Promise (it can't know ahead of time which calls
-          // will actually suspend) -- so even this non-suspending call must be awaited.
-          text = await DecodeModule.decodeQrRgba(ptr, capCanvas.width, capCanvas.height);
+          // decodeQrRgba/decodeQrChannelsRgba are plain synchronous C++ functions, but Asyncify
+          // wraps every embind-bound function to return a Promise (it can't know ahead of time
+          // which calls will actually suspend) -- so even these non-suspending calls must be
+          // awaited.
+          if (colorMultiplexActive) {
+            const texts = await DecodeModule.decodeQrChannelsRgba(ptr, capCanvas.width, capCanvas.height);
+            for (let c = 0; c < 3; c++) if (texts[c]) offerDecodedColor(c, texts[c]);
+          } else {
+            const text = await DecodeModule.decodeQrRgba(ptr, capCanvas.width, capCanvas.height);
+            if (text) offerDecoded(text);
+          }
         } finally {
           DecodeModule._free(ptr);
         }
-        if (text) offerDecoded(text);
       }
     } catch (e) {
       log("[decode] errore ignorato su questo frame: " + e.message);
@@ -224,7 +327,7 @@ function selectedMode() { return document.querySelector('input[name="mode"]:chec
 function updateModeUI() {
   const isBroadcast = selectedMode() === "broadcast";
   $("bidirSection").querySelectorAll("input, select").forEach((el) => (el.disabled = isBroadcast));
-  $("broadcastSection").querySelectorAll("input:not(#broadcastFpsInput)").forEach((el) => (el.disabled = !isBroadcast));
+  $("broadcastSection").querySelectorAll("input, select").forEach((el) => (el.disabled = !isBroadcast));
   $("fileSection").classList.toggle("hidden", selectedRole() !== "send");
 }
 
@@ -253,6 +356,13 @@ async function onStart() {
   session = new Module.WebSession();
   const ecLevel = parseInt($("ecLevelSelect").value, 10);
 
+  // EXPERIMENTAL color-multiplex opt-in (see src/wasm_link.cpp's JsLink) -- reset the per-channel
+  // de-dup state at the start of every transfer so a stale value from a previous run (or from the
+  // classic single-QR path) can never leak in as a false "already seen" match.
+  colorMultiplexActive = $("colorMultiplexCheck").checked;
+  colorLastSeen.fill("");
+  colorLastReturned.fill("");
+
   try {
     if (mode === "bidir" && role === "send") {
       const file = $("fileInput").files[0];
@@ -261,12 +371,12 @@ async function onStart() {
       Module.FS.writeFile("/input_file", buf);
       const fps = parseFloat($("fpsInput").value);
       const chunkMax = parseInt($("chunkMaxInput").value, 10);
-      const result = await session.runSend("/input_file", fps, chunkMax, ecLevel);
+      const result = await session.runSend("/input_file", fps, chunkMax, ecLevel, colorMultiplexActive);
       log("[send] " + (result.success ? "completato: " : "fallito: ") + result.message);
       $("statusLabel").textContent = result.success ? "Invio completato." : "Invio fallito.";
     } else if (mode === "bidir" && role === "receive") {
       const fps = parseFloat($("fpsInput").value);
-      const result = await session.runReceive(fps, 30);
+      const result = await session.runReceive(fps, 30, colorMultiplexActive);
       handleReceiveResult(result);
     } else if (mode === "broadcast" && role === "send") {
       const file = $("fileInput").files[0];
@@ -275,11 +385,14 @@ async function onStart() {
       Module.FS.writeFile("/input_file", buf);
       const chunk = parseInt($("broadcastChunkInput").value, 10);
       const loops = parseInt($("loopsInput").value, 10);
-      const result = await session.runBroadcastSend("/input_file", 3.0, chunk, ecLevel, loops);
+      const broadcastFps = parseFloat($("broadcastFpsInput").value);
+      const result = await session.runBroadcastSend(
+        "/input_file", broadcastFps, chunk, ecLevel, loops, colorMultiplexActive);
       log("[broadcast-send] " + (result.success ? "completato: " : "fallito: ") + result.message);
       $("statusLabel").textContent = result.success ? "Invio completato." : "Invio fallito.";
     } else {
-      const result = await session.runBroadcastReceive(3.0, 30);
+      const broadcastFps = parseFloat($("broadcastFpsInput").value);
+      const result = await session.runBroadcastReceive(broadcastFps, 30, colorMultiplexActive);
       handleReceiveResult(result);
     }
   } catch (e) {

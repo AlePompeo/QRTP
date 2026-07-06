@@ -12,6 +12,7 @@
 #include "qrtp/base64.hpp"
 #include "qrtp/broadcast.hpp"
 #include "qrtp/crc32.hpp"
+#include "qrtp/fountain.hpp"
 #include "qrtp/framing.hpp"
 #include "qrtp/link.hpp"
 #include "qrtp/protocol.hpp"
@@ -287,6 +288,168 @@ void test_broadcast_transfer() {
     CHECK(meta.filesize == content.size());
 }
 
+void test_fountain_code() {
+    // Pure algorithmic test of the LT code itself (fountain.hpp/fountain.cpp) — no LoopbackLink or
+    // threads needed: encode K blocks, simulate symbol loss directly, decode, verify an exact byte
+    // match. Fully deterministic (fixed seeds throughout), so a failure here always reproduces.
+    constexpr size_t kNumBlocks = 50;
+    constexpr size_t kBlockSize = 32;
+    std::mt19937 rng(7);
+    std::vector<std::vector<uint8_t>> blocks(kNumBlocks);
+    for (auto& b : blocks) {
+        b.resize(kBlockSize);
+        for (auto& byte : b) byte = static_cast<uint8_t>(rng() & 0xFF);
+    }
+
+    qrtp::LtDecoder decoder(kNumBlocks, kBlockSize);
+    std::mt19937 loss_rng(42);
+    std::uniform_real_distribution<double> unif(0.0, 1.0);
+    constexpr double kLossProbability = 0.2;
+    // Generous cap: well beyond what Robust Soliton should ever need at 20% loss for K=50.
+    constexpr uint32_t kMaxSymbols = kNumBlocks * 10;
+
+    uint32_t symbol_index = 0;
+    while (!decoder.is_complete() && symbol_index < kMaxSymbols) {
+        if (unif(loss_rng) >= kLossProbability) { // symbol "arrives"
+            decoder.add_symbol(symbol_index, qrtp::lt_encode_symbol(symbol_index, blocks));
+        }
+        ++symbol_index;
+    }
+
+    CHECK(decoder.is_complete());
+    if (decoder.is_complete()) {
+        std::vector<uint8_t> expected;
+        expected.reserve(kNumBlocks * kBlockSize);
+        for (const auto& b : blocks) expected.insert(expected.end(), b.begin(), b.end());
+        CHECK(decoder.assemble(expected.size()) == expected);
+    }
+}
+
+void test_broadcast_high_loss_reliability() {
+    // Demonstrates the fountain code's reliability advantage concretely, not just in theory: at
+    // this loss rate and loops budget, the *old* per-offset-repeat scheme this replaced would very
+    // likely have failed -- for K=100 blocks at p=0.30 loss and loops=3, the expected number of
+    // specific chunks that miss *every single one* of the 3 passes is K*p^3 ~= 100*0.027 ~= 2.7, a
+    // near-certain failure for that scheme. The fountain code only needs *some* sufficient number
+    // of symbols, never those specific ones, so it tolerates this rate comfortably in the same
+    // symbol budget (loops*K = 300 symbols available, vastly more than the ~110-140 actually
+    // needed to decode 100 blocks with typical Robust Soliton overhead).
+    std::vector<uint8_t> content;
+    content.reserve(5000);
+    std::mt19937 rng(123);
+    for (int i = 0; i < 5000; ++i) content.push_back(static_cast<uint8_t>(rng() & 0xFF));
+
+    const std::string path = "/tmp/qrtp_selftest_broadcast_highloss_input.bin";
+    {
+        std::ofstream f(path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(content.data()), static_cast<std::streamsize>(content.size()));
+    }
+
+    qrtp::LoopbackConfig lcfg;
+    lcfg.loss_probability = 0.30;
+    lcfg.corruption_probability = 0.0; // isolate the loss-tolerance property specifically
+    lcfg.latency = std::chrono::milliseconds(1);
+    lcfg.seed = 55;
+    auto link_pair = qrtp::LoopbackLink::make_pair(lcfg);
+
+    qrtp::BroadcastConfig bcfg;
+    bcfg.chunk_size = 50; // -> 100 blocks for a 5000-byte file
+    bcfg.loops = 3;
+    qrtp::BroadcastResult result;
+    qrtp::TransferMetadata meta;
+    std::optional<std::vector<uint8_t>> received;
+
+    std::thread sender_thread([&] {
+        qrtp::BroadcastSender sender(*link_pair.first, bcfg);
+        result = sender.send_file(path);
+    });
+    std::thread receiver_thread([&] {
+        qrtp::BroadcastReceiver receiver(*link_pair.second, bcfg);
+        received = receiver.receive_file(meta, std::chrono::milliseconds(15000));
+    });
+    sender_thread.join();
+    receiver_thread.join();
+
+    CHECK(received.has_value());
+    if (received) CHECK(*received == content);
+}
+
+void test_broadcast_late_join() {
+    // Directly engineers the "receiver sees DATA symbols before ever seeing a header" scenario
+    // (hand-crafted frames, not a real BroadcastSender, so session id/timing/ordering are fully
+    // controlled) to verify BroadcastReceiver::receive_file()'s pre-header buffering actually
+    // contributes those symbols to the decode instead of discarding them (the old offset-repeat
+    // scheme this replaced discarded any DATA frame seen before the header).
+    //
+    // The first half of the file's blocks are sent (systematically) *before* any header at all;
+    // the header follows; then the second half is sent (also systematically). Decoding needs
+    // *both* halves — the second half alone (everything sent after the header) can never cover
+    // the first half's block indices, since those were only ever sent pre-header. If the pre-
+    // header buffering didn't work, this decode could not complete.
+    std::vector<uint8_t> content;
+    content.reserve(2000);
+    std::mt19937 rng(321);
+    for (int i = 0; i < 2000; ++i) content.push_back(static_cast<uint8_t>(rng() & 0xFF));
+
+    constexpr size_t kChunkSize = 40;
+    const size_t num_blocks = (content.size() + kChunkSize - 1) / kChunkSize;
+    std::vector<std::vector<uint8_t>> blocks(num_blocks);
+    for (size_t i = 0; i < num_blocks; ++i) {
+        const size_t start = i * kChunkSize;
+        const size_t len = std::min(kChunkSize, content.size() - start);
+        blocks[i].assign(kChunkSize, 0);
+        std::copy(content.begin() + static_cast<long>(start), content.begin() + static_cast<long>(start + len),
+                   blocks[i].begin());
+    }
+    const auto digest = qrtp::sha256(content.data(), content.size());
+    constexpr uint16_t kSession = 0xABCD;
+
+    qrtp::LoopbackConfig lcfg;
+    lcfg.latency = std::chrono::milliseconds(1);
+    lcfg.seed = 77;
+    auto link_pair = qrtp::LoopbackLink::make_pair(lcfg);
+
+    qrtp::BroadcastConfig bcfg;
+    bcfg.chunk_size = kChunkSize;
+
+    qrtp::TransferMetadata meta;
+    std::optional<std::vector<uint8_t>> received;
+    std::thread receiver_thread([&] {
+        qrtp::BroadcastReceiver receiver(*link_pair.second, bcfg);
+        received = receiver.receive_file(meta, std::chrono::milliseconds(5000));
+    });
+
+    const size_t half = num_blocks / 2;
+    for (uint32_t s = 0; s < half; ++s) { // pre-header: first half, systematic (s < num_blocks)
+        qrtp::Frame f;
+        f.type = qrtp::FrameType::DATA;
+        f.session_id = kSession;
+        f.seq = s;
+        f.payload = qrtp::lt_encode_symbol(s, blocks);
+        link_pair.first->send(qrtp::encode_frame(f));
+    }
+
+    qrtp::Frame header;
+    header.type = qrtp::FrameType::SYN;
+    header.session_id = kSession;
+    header.payload = qrtp::pack_file_metadata("test.bin", content.size(), digest);
+    link_pair.first->send(qrtp::encode_frame(header));
+
+    for (uint32_t s = static_cast<uint32_t>(half); s < num_blocks; ++s) { // post-header: second half
+        qrtp::Frame f;
+        f.type = qrtp::FrameType::DATA;
+        f.session_id = kSession;
+        f.seq = s;
+        f.payload = qrtp::lt_encode_symbol(s, blocks);
+        link_pair.first->send(qrtp::encode_frame(f));
+    }
+
+    receiver_thread.join();
+
+    CHECK(received.has_value());
+    if (received) CHECK(*received == content);
+}
+
 int main() {
     test_crc32();
     test_base64();
@@ -297,6 +460,9 @@ int main() {
     test_end_to_end_transfer();
     test_cancellation();
     test_broadcast_transfer();
+    test_fountain_code();
+    test_broadcast_high_loss_reliability();
+    test_broadcast_late_join();
 
     std::printf("\n%s (%d failing check%s)\n", g_failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED", g_failures,
                 g_failures == 1 ? "" : "s");

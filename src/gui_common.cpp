@@ -23,6 +23,11 @@ void RunGuiTransfer(const GuiTransferParams& params, std::atomic<bool>* cancel,
         ocfg.use_wechat_qrcode = params.use_wechat_qrcode;
         ocfg.enhance_camera_contrast = params.enhance_camera_contrast;
         ocfg.log = log;
+        // Same cancel flag passed to ProtocolConfig::cancel/BroadcastConfig::cancel below — lets
+        // OpticalLink draw/wire its own on-screen "STOP" button (see optical_link.cpp) using the
+        // exact same cooperative-cancellation mechanism, automatically covering both roles and
+        // both modes since this is the one place that constructs OpticalLink for either GUI.
+        ocfg.cancel = cancel;
         OpticalLink link(ocfg);
 
         // Unidirezionale (broadcast/listen): coexists with the bidirectional path below as a

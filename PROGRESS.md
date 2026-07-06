@@ -1214,3 +1214,188 @@ logic, or anything `web/roundtrip_test.mjs` exercises, so that test wasn't re-ru
 here could meaningfully verify camera-switching behavior short of a real device, which is exactly
 what surfaced both bugs in the first place. Rebuilt `qrtp-web.zip` (still v56, binary refresh) and
 re-uploaded. **Not yet re-confirmed by the user on their phone.**
+
+## Selectable unidirectional FPS (3/5/7) + on-screen "STOP" button on the QR window (same day)
+
+Two related requests, both extended explicitly to "the whole codebase" (Win32, GTK3, web — not
+one platform): the unidirectional/broadcast FPS field was hard-locked at 3.0 everywhere (a
+disabled control just displaying the fixed value); asked to make it a real choice among 3/5/7
+instead. Separately: the native GUIs' QR-display window (`OpticalLink`'s `out_window_name_`) is
+topmost and roughly full-screen (see the 2026-07-06 "QR window pinned topmost" entry above), which
+can leave the control panel — and its "Ferma" button — hidden behind it; asked for a button
+directly on the QR window itself (top-right), explicitly for both bidirectional and broadcast
+modes, both sender and receiver.
+
+**FPS selector**: same pattern across all three GUIs — the always-disabled field becomes a real,
+constrained choice (not free text): `gui_win32.cpp`'s `IDC_FPS_BROADCAST_EDIT` from a
+`WS_DISABLED EDIT` to a `COMBOBOX CBS_DROPDOWNLIST` (3/5/7, `GetDlgItemTextW` still works
+unchanged); `gui_gtk.cpp`'s `fps_broadcast_entry` from an insensitive `GtkEntry` to a
+`GtkComboBoxText` (new `ComboText()` helper wraps `gtk_combo_box_text_get_active_text()`'s
+`g_free()`-needing return); `web/index.html`'s `broadcastFpsInput` from a disabled `<input
+type=number>` to an enabled `<select>`. All three now toggle sensitivity with the mode radio
+buttons exactly like the other broadcast-only fields (`IDC_CHUNKSIZE_EDIT`/`chunksize_entry`/
+`broadcastChunkInput`), instead of being permanently locked. `BroadcastConfig::fps` itself needed
+no change — it was always a plain `double`, the {3,5,7} constraint is purely a GUI choice, not a
+library limit. CLI (`--fps` on `qrtp broadcast`/`listen`) untouched: it already accepts any value,
+a superset of {3,5,7}, so there was nothing to "unlock" there.
+
+**STOP button**: implemented once, in `optical_link.cpp`/`optical_link.hpp` — the single place
+that draws to `out_window_name_`, called by `Sender` (SYN/DATA), `Receiver` (ACK/SACK), and
+`BroadcastSender` alike, so this covers bidirectional+broadcast and sender+receiver automatically
+with no changes to `protocol.cpp`/`broadcast.cpp`. New `OpticalLinkConfig::cancel` (`std::atomic
+<bool>*`, default `nullptr`) reuses the exact cooperative-cancellation flag `ProtocolConfig::cancel`
+/`BroadcastConfig::cancel` already check at their own checkpoints — no new signaling path needed.
+`gui_common.cpp`'s `RunGuiTransfer()` sets `ocfg.cancel = cancel;` (one line) since it's the only
+place that constructs `OpticalLink` for either native GUI. When set, the constructor computes a
+fixed button rect (120x36px, 8px margin, top-right corner of the screen) and registers
+`cv::setMouseCallback` on `out_window_name_`; `draw_stop_button()` (called after every
+`show_padded()`, before `imshow()`, at both call sites — the classic and multi-QR-per-frame paths)
+draws a light-gray "STOP" rectangle there every frame; a click inside it sets `cfg_.cancel->store
+(true)`. Left undrawn/unwired entirely when `cfg_.cancel` is `nullptr` (e.g. plain CLI usage with
+no cancel flag to control) rather than showing a button that would do nothing. Web app untouched
+for this part — it already has a "Ferma" button reachable on the same page, no separate always-on-
+top OS window to hide behind.
+
+**Known trade-off, flagged not solved**: the button sits in the screen's absolute top-right
+corner, which stays in the QR's white padding margin on realistic displays (the content is always
+centered with a margin of at least ~5% of the screen's smaller dimension — `target = 0.9 *
+min(screen_w_, screen_h_)` in `send()`), but could nick the outer quiet zone (not the finder
+pattern itself, which sits further in) on an unusually small/square display. No adaptive
+positioning logic added for this — consistent with the rest of the project's preference for
+simplicity over handling a not-yet-observed edge case.
+
+**Verified**: `make clean && make WITH_OPENCV=1 && make test` (native Linux, all checks pass),
+`make bin/qrtp_gui WITH_OPENCV=1` (GTK3 GUI compiles/links clean), MinGW cross-compile rebuild of
+`qrtp_gui.exe` (Windows GUI compiles/links clean — this is the first time `optical_link.cpp` was
+recompiled for *both* GUI targets in the same session, since the stop-button code is shared).
+`web/roundtrip_test.mjs` re-run clean (unaffected — the WASM core wasn't touched, only
+`index.html`/`main.js`). **Not visually verified on either native GUI** — no display/Xvfb in this
+environment, same level of verification already accepted for the rest of the native GUI code
+throughout this project; the user will need to confirm on real Windows/Linux hardware that the
+button is clickable where expected and the FPS selector shows/reads 3/5/7 correctly.
+
+## Fountain code (LT code) replaces plain looping for the broadcast/unidirectional mode (same day)
+
+After researching faster/more-reliable/more-innovative techniques for the protocol (fountain
+codes, JAB Code color barcodes, zxing-cpp vs OpenCV benchmarks, Display-Field Communication — see
+the sources cited in that discussion), chose to implement the highest value/effort option: replace
+`BroadcastSender`/`BroadcastReceiver`'s old scheme (loop the whole file in order, a fixed number of
+times) with a real **LT fountain code** (Luby, "LT Codes", FOCS 2002 — the same class of code
+DVB-H/3GPP MBMS use for broadcast delivery). Explicitly requested to cover the whole codebase and
+come with proper tests.
+
+**Why this is a real fix, not just a theoretical one**: the old scheme suffered the "coupon
+collector" problem — a receiver could see the same chunk dozens of times and still be missing the
+same last 2-3 specific offsets, needing an entire extra pass to have any chance at exactly those.
+A fountain code's sender instead emits a potentially endless stream of *encoded symbols* (XOR
+combinations of the file's source blocks); the receiver stops the moment it has *any sufficient
+number* of them, never specific ones.
+
+**New module, `include/qrtp/fountain.hpp` + `src/fountain.cpp`** (isolated from `broadcast.cpp` so
+the algorithm itself is unit-testable): `lt_degree_for_symbol()`/`lt_indices_for_symbol()` are
+deterministic from `(symbol_index, num_blocks)` alone via a seeded PRNG — sender and receiver
+independently compute the identical combination for a given symbol without exchanging anything
+else. Symbols `0..num_blocks-1` are systematic (degree 1, the raw block itself — a clean channel
+behaves exactly like the old scheme, zero overhead); only `symbol_index >= num_blocks` draws a
+degree from a **Robust Soliton distribution** (the standard robustness fix over the "ideal"
+Soliton distribution, which is optimal in theory but stalls in practice) and picks that many
+distinct blocks via partial Fisher-Yates. `LtDecoder` is the matching peeling/belief-propagation
+decoder: an iterative worklist (not recursion — a single symbol can cascade-resolve a long chain
+for a large file, and recursion depth isn't worth risking), XOR-cancelling resolved blocks out of
+every waiting equation and resolving any that drop to degree 1, repeating until nothing more
+cascades.
+
+**`broadcast.cpp` changes**: `BroadcastSender::send_file()` now splits the file into K
+zero-padded blocks and emits `lt_encode_symbol()` output as DATA frames (`seq` = symbol index, not
+a byte offset — a redefinition scoped entirely to broadcast.cpp; the bidirectional protocol's
+`Frame::seq` is untouched). `loops` is reinterpreted from "N full passes" to "stop after ~N*K
+symbols" — same order-of-magnitude redundancy as before, no config/GUI changes needed anywhere.
+`BroadcastReceiver::receive_file()` replaces its offset map/set bookkeeping with an `LtDecoder`.
+
+**Bonus that falls out for free**: DATA frames seen *before* the header arrives are now buffered
+(`pending_pre_header`) and fed into the decoder retroactively once the header (and therefore K) is
+known, instead of being discarded outright like the old scheme did — directly resolving the
+"receiver tunes in mid-broadcast wastes everything seen before the header cycles back" concern
+raised earlier in this session, as a natural consequence of the fountain code rather than a
+separate fix.
+
+**Whole-codebase coverage confirmed by construction, not assumption**: `BroadcastConfig`'s fields
+are unchanged, and `BroadcastSender`/`BroadcastReceiver` are the *only* place any of this logic
+lives — CLI, both native GUIs (via `gui_common.cpp`), and the web app (via `wasm_link.cpp`'s
+`WebSession::run_broadcast_send`/`run_broadcast_receive`) all call these two classes with zero
+knowledge of what's inside, so the new coding scheme applies everywhere automatically. Verified by
+actually rebuilding all four targets, not just reasoning about it: native Linux CLI/tests, GTK3 GUI,
+MinGW cross-compiled Windows GUI, and WASM (`qrtp_web`) all recompiled clean with no other changes
+needed anywhere outside `broadcast.hpp`/`broadcast.cpp`/the new `fountain.hpp`/`fountain.cpp`.
+
+**Tests** (`tests/test_main.cpp`): the pre-existing `test_broadcast_transfer()` (LoopbackLink, 5%
+loss/2% corruption) passes unmodified — no test-visible behavior change for the common case. Three
+new tests: `test_fountain_code()` (pure algorithmic — encode/decode with simulated 20% symbol loss,
+no LoopbackLink/threads, fully deterministic); `test_broadcast_high_loss_reliability()` (30% loss,
+only 3x redundancy budget — a scenario the *old* scheme would very likely have failed, since
+`K*p^loops ≈ 100*0.3³ ≈ 2.7` specific chunks would be expected to miss every single pass; the
+fountain code only needs *some* sufficient count, so it comfortably succeeds in the same budget);
+`test_broadcast_late_join()` (hand-crafted frames, not a real `BroadcastSender`, to fully control
+timing — sends the first half of the file's blocks *before* any header, the second half after,
+proving decode needs *both* halves and therefore that the pre-header buffering actually
+contributed the first half rather than the post-header symbols alone being sufficient). All pass,
+deterministically (fixed seeds throughout), on the first run with no constant-tuning needed.
+
+**Verified**: `make clean && make WITH_OPENCV=1 && make test` (native Linux, all checks including
+the 3 new tests pass), `make bin/qrtp_gui WITH_OPENCV=1` (GTK3), MinGW cross-compile `qrtp_gui.exe`
+(Windows) — all clean, zero warnings from the new code. WASM (`qrtp_web`) rebuilt clean;
+`web/roundtrip_test.mjs`'s broadcast scenario re-run and still passes — its log now visibly shows
+the fountain code's systematic phase resolving one block per symbol (this test file is small
+enough, and the simulated channel clean enough, that the non-systematic/Robust-Soliton path never
+even triggers — expected and correct, exactly the "clean channel behaves like the old scheme"
+property by design).
+
+## Color-multiplex QR — experimental, opt-in, web app only (same day)
+
+Follow-up to the smartphone-mode design discussion: implemented as requested, for sender and
+receiver, bidirectional and broadcast alike, gated behind an unchecked-by-default checkbox (never
+affects the classic single-QR path when off). Encodes up to 3 independent QR codes into the R, G,
+B channels of one color image instead of one QR per displayed frame, rather than inventing a new
+barcode symbology (JAB Code) from scratch — reuses the exact same `qr_encode_bytes`/`ReadBarcode`
+pipeline already validated for the rest of this port, just applied 3 times per frame.
+
+**Zero changes outside the web target**, exactly as scoped: `protocol.cpp`, `broadcast.cpp`,
+`adaptive.hpp`, both native GUIs untouched. This works the same way the existing native spatial
+multi-QR-grid mode (`OpticalLink::send_multi()`/`try_receive_multi()`, `qr_codes_per_frame`)
+already keeps `Sender`/`Receiver`/`BroadcastSender`/`BroadcastReceiver` unaware that batching is
+happening at all — `JsLink` (`src/wasm_link.cpp`) got the identical treatment, batching by color
+channel instead of screen position, entirely inside `ILink::send()`/`try_receive()`.
+
+**Decode trick, no buffer copy**: `ZXing::ImageView`'s constructor accepts explicit `rowStride`/
+`pixStride` — a new `decode_qr_channels_rgba()` treats an RGBA buffer's R/G/B bytes as 3
+independent single-channel (`Lum`) images in place (`data+channel`, `pixStride=4` to skip the
+other 3 bytes/pixel, `rowStride=width*4`), no manual pixel extraction loop needed.
+
+**The batching-flush problem, solved once and reused**: `JsLink::send()` accumulates up to 3
+encoded QRs before rendering; `try_receive()` flushes whatever's pending (even just 1-2) *before*
+waiting for a decoded reply — correct because the caller is about to block on a response to
+something it hasn't even shown yet. For `BroadcastSender` (which never calls `try_receive()` at
+all): the fountain code's continuous symbol stream almost always fills a batch of 3 on its own;
+only the last 1-2 symbols at the very tail of a bounded (`loops>0`) run could go unshown — accepted
+as a minor, already-redundant edge case rather than adding teardown-flush machinery.
+
+**Honest, stated (not hidden) limitation**: the real throughput benefit differs by mode. Broadcast
+mode's continuous stream almost always has 3 symbols ready together — bidirectional mode's
+send()/`try_receive()` interleaving often doesn't (a lone SYN/ACK, or the last DATA frame of a
+window), so many bidirectional frames will flush as "1 of 3 channels used." Also stated plainly:
+this makes the *opposite* bet from this project's own real-hardware finding that zeroing camera
+saturation improves classic QR reliability ("color is noise") — color-multiplex mode assumes color
+*carries* information instead, which is exactly why it stays opt-in and unverified rather than a
+default.
+
+**Verified**: `web/roundtrip_test.mjs` extended with `makeSideColor()`/`rasterizeQrColor()`/
+`runScenarioColor()` (parallel to the existing single-QR helpers, mirroring `web/main.js`'s real
+color-mode logic) and two new scenarios — bidirectional and broadcast, both with
+`color_multiplex=true` — exercising the full mechanism end-to-end (encode 3 channels → composite
+into one RGBA buffer → split back into 3 planes → decode independently → per-channel dedup →
+deliver to the unmodified protocol layer) with no real hardware. All 4 scenarios (2 classic + 2
+color) pass; the bidirectional color-multiplex run even triggered and correctly recovered from a
+real AIMD retransmit mid-transfer, a genuine stress case, not just a happy path. Native test suite
+re-run clean (unaffected — this feature is entirely inside `wasm_link.cpp`/`web/`). **Not tested
+in an actual browser or with a real camera** — same standing gap as the rest of the web port, more
+pronounced here given the deliberately unconventional (color-carries-data) assumption.

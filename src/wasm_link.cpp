@@ -31,6 +31,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -59,9 +60,67 @@ val bridge() { return val::module_property("qrtpBridge"); }
 
 } // namespace
 
+// EXPERIMENTAL, opt-in (color_multiplex=true): instead of one QR per displayed frame, encodes up
+// to 3 independent QR codes into the R, G, B channels of a single color image — the exact same
+// role OpticalLink::send_multi()/try_receive_multi() play for the native spatial-grid multi-QR
+// mode (qr_codes_per_frame), just batching by color channel instead of screen position. Web-only:
+// this project already found (real hardware) that zeroing camera saturation improves classic QR
+// reliability ("color is noise") — this feature makes the opposite bet, so it stays opt-in/
+// unverified-on-real-hardware rather than a default, and native GUIs aren't touched at all.
 class JsLink : public ILink {
 public:
+    explicit JsLink(bool color_multiplex = false) : color_multiplex_(color_multiplex) {}
+
     void send(const std::vector<uint8_t>& frame_bytes) override {
+        if (!color_multiplex_) {
+            send_one(frame_bytes);
+            return;
+        }
+        const std::string encoded_text = base64_encode(frame_bytes);
+        const std::vector<uint8_t> encoded_bytes(encoded_text.begin(), encoded_text.end());
+        pending_send_batch_.push_back(
+            qr_encode_bytes(encoded_bytes, static_cast<QrEcLevel>(static_cast<uint8_t>(ec_level_))));
+        if (pending_send_batch_.size() >= 3) flush_send_batch();
+        // Otherwise: wait for more before showing anything — see try_receive()'s flush-on-stall
+        // note below for why an incomplete batch never gets stuck unshown in bidirectional mode.
+    }
+
+    bool try_receive(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) override {
+        if (!color_multiplex_) return try_receive_one(out, timeout);
+
+        // The caller is about to block waiting for a reply to whatever it just sent — anything
+        // still sitting in the batch (1 or 2 QRs, never reached 3) must go out now, or the other
+        // side can never see it at all. Correct for both roles: Sender bursts several send()s
+        // then waits for a SACK; Receiver's own ACK/SACK sends interleave with waiting for DATA.
+        if (!pending_send_batch_.empty()) flush_send_batch();
+
+        if (!pending_decoded_.empty()) {
+            out = base64_decode(pending_decoded_.front());
+            pending_decoded_.pop_front();
+            return true;
+        }
+
+        val result = bridge().call<val>("waitForFrameColor", static_cast<int>(timeout.count())).await();
+        const unsigned len = result["length"].as<unsigned>();
+        if (len == 0) return false;
+        for (unsigned i = 0; i < len; ++i) pending_decoded_.push_back(result[i].as<std::string>());
+
+        out = base64_decode(pending_decoded_.front());
+        pending_decoded_.pop_front();
+        return true;
+    }
+
+    void set_fps(double fps) override {
+        fps_ = fps;
+        bridge().call<void>("setFps", fps);
+    }
+    void set_ec_level(ECLevel level) override {
+        ec_level_ = level;
+        bridge().call<void>("setEcLevel", static_cast<int>(level));
+    }
+
+private:
+    void send_one(const std::vector<uint8_t>& frame_bytes) {
         const std::string encoded_text = base64_encode(frame_bytes);
         const std::vector<uint8_t> encoded_bytes(encoded_text.begin(), encoded_text.end());
         const QrMatrix qr = qr_encode_bytes(encoded_bytes, static_cast<QrEcLevel>(static_cast<uint8_t>(ec_level_)));
@@ -76,7 +135,7 @@ public:
         bridge().call<val>("sleep", dwell_ms).await();
     }
 
-    bool try_receive(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) override {
+    bool try_receive_one(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) {
         // Asyncify suspends the whole call stack up to whatever exported WebSession method
         // started this (run_send/run_receive/...) here, and resumes it once the JS Promise
         // settles — see the file header comment. waitForFrame() itself resolves with "" if
@@ -88,18 +147,31 @@ public:
         return true;
     }
 
-    void set_fps(double fps) override {
-        fps_ = fps;
-        bridge().call<void>("setFps", fps);
-    }
-    void set_ec_level(ECLevel level) override {
-        ec_level_ = level;
-        bridge().call<void>("setEcLevel", static_cast<int>(level));
+    void flush_send_batch() {
+        if (pending_send_batch_.empty()) return;
+        val channels = val::array();
+        for (size_t c = 0; c < pending_send_batch_.size(); ++c) {
+            const auto& qr = pending_send_batch_[c];
+            val modules = val::array();
+            for (size_t i = 0; i < qr.modules.size(); ++i) modules.set(i, qr.modules[i]);
+            val entry = val::object();
+            entry.set("width", qr.width);
+            entry.set("modules", modules);
+            channels.set(c, entry);
+        }
+        bridge().call<void>("renderQrColor", channels);
+        // One dwell for the whole composite frame (not once per channel) — this is still a single
+        // displayed frame, same pacing contract as send_one() above.
+        const int dwell_ms = static_cast<int>(1000.0 / std::max(1.0, fps_));
+        bridge().call<val>("sleep", dwell_ms).await();
+        pending_send_batch_.clear();
     }
 
-private:
     ECLevel ec_level_ = ECLevel::M;
     double fps_ = 10.0;
+    bool color_multiplex_ = false;
+    std::vector<QrMatrix> pending_send_batch_;  // up to 3, R/G/B — color_multiplex_ only
+    std::deque<std::string> pending_decoded_;   // decoded base64 texts not yet returned — color_multiplex_ only
 };
 
 
@@ -123,6 +195,27 @@ std::string decode_qr_rgba(uintptr_t ptr, int width, int height) {
     return barcode.text();
 }
 
+// EXPERIMENTAL color-multiplex counterpart to decode_qr_rgba(): decodes each of the R/G/B channels
+// of the same captured RGBA frame as an *independent* grayscale QR image, returning a JS array of
+// exactly 3 strings ("" for a channel with no valid QR this frame). No pixel copy needed: each
+// channel is viewed in place via ImageView's own pixStride/rowStride override — starting at
+// data+channel and stepping 4 bytes per pixel (skipping the other 3 channels) is indistinguishable
+// to ZXing from a genuinely separate single-channel (Lum) image occupying that same memory.
+val decode_qr_channels_rgba(uintptr_t ptr, int width, int height) {
+    const auto* data = reinterpret_cast<const uint8_t*>(ptr);
+    val out = val::array();
+    for (int channel = 0; channel < 3; ++channel) {
+        const ZXing::ImageView view(data + channel, width, height, ZXing::ImageFormat::Lum,
+                                     /*rowStride=*/width * 4, /*pixStride=*/4);
+        ZXing::ReaderOptions opts;
+        opts.setFormats(ZXing::BarcodeFormat::QRCode);
+        opts.setTryHarder(false);
+        const auto barcode = ZXing::ReadBarcode(view, opts);
+        out.set(channel, barcode.isValid() ? barcode.text() : std::string());
+    }
+    return out;
+}
+
 // One transfer session's worth of state: just the cooperative-cancellation flag every
 // Sender/Receiver/BroadcastSender/BroadcastReceiver already accepts (ProtocolConfig::cancel /
 // BroadcastConfig::cancel) — same role as the "Stop" button in gui_win32.cpp/gui_gtk.cpp.
@@ -137,10 +230,11 @@ public:
     // cross that boundary, exactly like Sender::send_file already does for a plain "file not
     // found" (both are just different flavors of "this attempt didn't work," reported the same
     // way to the caller).
-    TransferResult run_send(const std::string& path, double fps, int chunk_max, int ec_level) {
+    TransferResult run_send(const std::string& path, double fps, int chunk_max, int ec_level,
+                             bool color_multiplex) {
         try {
             cancel_flag_.store(false);
-            JsLink link;
+            JsLink link(color_multiplex);
             ProtocolConfig cfg;
             cfg.adaptive.fps_initial = fps;
             cfg.adaptive.chunk_size_initial = static_cast<size_t>(chunk_max);
@@ -155,10 +249,10 @@ public:
         }
     }
 
-    val run_receive(double fps, int timeout_minutes) {
+    val run_receive(double fps, int timeout_minutes, bool color_multiplex) {
         try {
             cancel_flag_.store(false);
-            JsLink link;
+            JsLink link(color_multiplex);
             ProtocolConfig cfg;
             cfg.adaptive.fps_initial = fps;
             cfg.cancel = &cancel_flag_;
@@ -183,10 +277,11 @@ public:
         }
     }
 
-    BroadcastResult run_broadcast_send(const std::string& path, double fps, int chunk_size, int ec_level, int loops) {
+    BroadcastResult run_broadcast_send(const std::string& path, double fps, int chunk_size, int ec_level, int loops,
+                                        bool color_multiplex) {
         try {
             cancel_flag_.store(false);
-            JsLink link;
+            JsLink link(color_multiplex);
             BroadcastConfig cfg;
             cfg.chunk_size = static_cast<size_t>(chunk_size);
             cfg.ec_level = static_cast<ECLevel>(ec_level);
@@ -201,10 +296,10 @@ public:
         }
     }
 
-    val run_broadcast_receive(double fps, int timeout_minutes) {
+    val run_broadcast_receive(double fps, int timeout_minutes, bool color_multiplex) {
         try {
             cancel_flag_.store(false);
-            JsLink link;
+            JsLink link(color_multiplex);
             BroadcastConfig cfg;
             cfg.fps = fps;
             cfg.cancel = &cancel_flag_;
@@ -247,6 +342,7 @@ EMSCRIPTEN_BINDINGS(qrtp_web) {
         .field("message", &qrtp::BroadcastResult::message);
 
     emscripten::function("decodeQrRgba", &qrtp::web::decode_qr_rgba);
+    emscripten::function("decodeQrChannelsRgba", &qrtp::web::decode_qr_channels_rgba);
 
     emscripten::class_<qrtp::web::WebSession>("WebSession")
         .constructor<>()

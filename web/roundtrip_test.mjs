@@ -97,6 +97,137 @@ function makeSide(decodeMod, who, channel) {
   return { bridge, stop: () => clearInterval(poll) };
 }
 
+// EXPERIMENTAL color-multiplex counterpart to rasterizeQr(): composites up to 3 {width, modules}
+// channel entries (R, G, B) into one RGBA buffer, mirroring web/main.js's real renderQrColor().
+function rasterizeQrColor(channels) {
+  const quiet = 4;
+  const scale = 4;
+  const present = channels.filter((c) => c && c.width > 0);
+  const maxWidth = present.length ? Math.max(...present.map((c) => c.width)) : 1;
+  const side = maxWidth + 2 * quiet;
+  const pix = side * scale;
+  const data = new Uint8Array(pix * pix * 4).fill(255);
+  for (let ch = 0; ch < 3; ch++) {
+    const info = channels[ch];
+    if (!info || !info.width) continue;
+    const w = info.width;
+    const modules = info.modules;
+    const chOffset = Math.floor((maxWidth - w) / 2);
+    for (let y = 0; y < w; y++) {
+      for (let x = 0; x < w; x++) {
+        if (!modules[y * w + x]) continue;
+        const px0 = (chOffset + x + quiet) * scale;
+        const py0 = (chOffset + y + quiet) * scale;
+        for (let dy = 0; dy < scale; dy++) {
+          for (let dx = 0; dx < scale; dx++) {
+            const idx = ((py0 + dy) * pix + (px0 + dx)) * 4;
+            data[idx + ch] = 0;
+          }
+        }
+      }
+    }
+  }
+  return { width: pix, height: pix, data };
+}
+
+// EXPERIMENTAL color-multiplex counterpart to makeSide(): same role (decode-dedicated instance,
+// fake "currently displayed frame" channel), but with 3 independent per-channel de-dup states and
+// decodeQrChannelsRgba instead of decodeQrRgba, mirroring web/main.js's real color-mode logic.
+function makeSideColor(decodeMod, who, channel) {
+  const other = who === "A" ? "B" : "A";
+  const lastSeen = ["", "", ""];
+  const lastReturned = ["", "", ""];
+  let pendingWaiter = null;
+
+  function collectNew() {
+    const newly = [];
+    for (let c = 0; c < 3; c++) {
+      if (lastSeen[c] && lastSeen[c] !== lastReturned[c]) {
+        newly.push(lastSeen[c]);
+        lastReturned[c] = lastSeen[c];
+      }
+    }
+    return newly;
+  }
+
+  function offerDecoded(ch, text) {
+    lastSeen[ch] = text;
+    if (!pendingWaiter) return;
+    const newly = collectNew();
+    if (newly.length === 0) return;
+    clearTimeout(pendingWaiter.timer);
+    const resolve = pendingWaiter.resolve;
+    pendingWaiter = null;
+    resolve(newly);
+  }
+
+  const poll = setInterval(async () => {
+    const frame = channel[other];
+    if (!frame) return;
+    const ptr = decodeMod._malloc(frame.data.length);
+    decodeMod.HEAPU8.set(frame.data, ptr);
+    try {
+      const texts = await decodeMod.decodeQrChannelsRgba(ptr, frame.width, frame.height);
+      for (let c = 0; c < 3; c++) if (texts[c]) offerDecoded(c, texts[c]);
+    } finally {
+      decodeMod._free(ptr);
+    }
+  }, 5);
+  poll.unref();
+
+  const bridge = {
+    renderQrColor(channels) { channel[who] = rasterizeQrColor(channels); },
+    waitForFrameColor(timeoutMs) {
+      return new Promise((resolve) => {
+        const newly = collectNew();
+        if (newly.length > 0) { resolve(newly); return; }
+        const timer = setTimeout(() => { pendingWaiter = null; resolve([]); }, timeoutMs);
+        pendingWaiter = { resolve, timer };
+      });
+    },
+    sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); },
+    setFps() {},
+    setEcLevel() {},
+    onLog(msg) { console.log(`[${who}] ${msg}`); },
+  };
+  return { bridge, stop: () => clearInterval(poll) };
+}
+
+async function runScenarioColor(label, payload, sendFn, receiveFn) {
+  console.log(`\n--- ${label} ---`);
+  const [ModA, ModB, DecodeA, DecodeB] = await Promise.all([
+    createQrtpModule(), createQrtpModule(), createQrtpModule(), createQrtpModule(),
+  ]);
+  const channel = { A: null, B: null };
+  const a = makeSideColor(DecodeA, "A", channel);
+  const b = makeSideColor(DecodeB, "B", channel);
+  ModA.qrtpBridge = a.bridge;
+  ModB.qrtpBridge = b.bridge;
+
+  ModA.FS.writeFile("/input_file", new Uint8Array(payload));
+
+  const sessionA = new ModA.WebSession();
+  const sessionB = new ModB.WebSession();
+
+  const [sendResult, receiveResult] = await Promise.all([sendFn(sessionA), receiveFn(sessionB)]);
+
+  console.log("send result:", sendResult);
+  console.log("receive success:", receiveResult.success, receiveResult.filename);
+
+  assert.ok(sendResult.success, "send failed: " + sendResult.message);
+  assert.ok(receiveResult.success, "receive failed");
+  const received = Buffer.from(receiveResult.data);
+  assert.ok(received.equals(payload), "received bytes do not match sent bytes");
+  assert.strictEqual(receiveResult.filename, "input_file");
+
+  console.log(`${label}: OK, ${received.length} bytes matched`);
+
+  a.stop();
+  b.stop();
+  sessionA.delete();
+  sessionB.delete();
+}
+
 async function runScenario(label, payload, sendFn, receiveFn) {
   console.log(`\n--- ${label} ---`);
   const [ModA, ModB, DecodeA, DecodeB] = await Promise.all([
@@ -141,15 +272,29 @@ async function main() {
   await runScenario(
     "bidirectional",
     payload,
-    (s) => s.runSend("/input_file", 10, 180, 1),
-    (s) => s.runReceive(10, 1)
+    (s) => s.runSend("/input_file", 10, 180, 1, false),
+    (s) => s.runReceive(10, 1, false)
   );
 
   await runScenario(
     "broadcast (unidirectional)",
     payload,
-    (s) => s.runBroadcastSend("/input_file", 5.0, 180, 2, 5), // loops=5: no ARQ, reliability via repetition
-    (s) => s.runBroadcastReceive(5.0, 1)
+    (s) => s.runBroadcastSend("/input_file", 5.0, 180, 2, 5, false), // loops=5: no ARQ, reliability via repetition
+    (s) => s.runBroadcastReceive(5.0, 1, false)
+  );
+
+  await runScenarioColor(
+    "bidirectional (EXPERIMENTAL color-multiplex)",
+    payload,
+    (s) => s.runSend("/input_file", 10, 180, 1, true),
+    (s) => s.runReceive(10, 1, true)
+  );
+
+  await runScenarioColor(
+    "broadcast (EXPERIMENTAL color-multiplex)",
+    payload,
+    (s) => s.runBroadcastSend("/input_file", 5.0, 180, 2, 5, true),
+    (s) => s.runBroadcastReceive(5.0, 1, true)
   );
 
   console.log("\nALL SCENARIOS OK");

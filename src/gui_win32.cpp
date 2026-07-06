@@ -59,7 +59,7 @@ constexpr int IDC_CONTRAST_CHECK = 117;
 constexpr int IDC_LOOPS_EDIT = 119;
 constexpr int IDC_RADIO_BIDIRECTIONAL = 120;
 constexpr int IDC_RADIO_BROADCAST = 121;
-constexpr int IDC_FPS_BROADCAST_EDIT = 122; // always disabled — purely shows the fixed value used
+constexpr int IDC_FPS_BROADCAST_EDIT = 122; // combobox: 3/5/7, enabled only in Unidirezionale mode
 constexpr int IDC_CHUNKSIZE_EDIT = 123;     // unidirezionale's own chunk-size field
 
 // Custom messages posted from the worker thread to the UI thread. Never touch a control directly
@@ -172,13 +172,13 @@ void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_in
 
 // Grays out whichever mode-specific parameter group doesn't apply to the currently-selected mode
 // (see the "Bidirezionale"/"Unidirezionale" groups in WM_CREATE) — called once at window creation
-// and again every time the mode radio buttons change. IDC_FPS_BROADCAST_EDIT is never touched
-// here: it's permanently disabled (WS_DISABLED at creation), purely displaying the fixed value.
+// and again every time the mode radio buttons change.
 void UpdateModeUI(HWND hwnd) {
     const bool broadcast = IsDlgButtonChecked(hwnd, IDC_RADIO_BROADCAST) == BST_CHECKED;
     EnableWindow(GetDlgItem(hwnd, IDC_FPS_EDIT), !broadcast);
     EnableWindow(GetDlgItem(hwnd, IDC_QRGRID_EDIT), !broadcast);
     EnableWindow(GetDlgItem(hwnd, IDC_CHUNKMAX_EDIT), !broadcast);
+    EnableWindow(GetDlgItem(hwnd, IDC_FPS_BROADCAST_EDIT), broadcast);
     EnableWindow(GetDlgItem(hwnd, IDC_CHUNKSIZE_EDIT), broadcast);
     EnableWindow(GetDlgItem(hwnd, IDC_LOOPS_EDIT), broadcast);
 }
@@ -292,13 +292,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // --- Group 5: parametri specifici della modalità unidirezionale (grigi/disabilitati
             // quando è selezionata Bidirezionale — vedi UpdateModeUI) ---
             mk(L"BUTTON", L"Unidirezionale (broadcast)", BS_GROUPBOX, 260, 248, 245, 100, 0);
-            mk(L"STATIC", L"FPS (fisso):", 0, 270, 268, 75, 18, 0);
-            // Always disabled (WS_DISABLED below) — this mode has no AIMD to adapt fps from (no
-            // feedback channel to adapt on at all), so per explicit user request it's a hard-coded
-            // 3.0 the GUI enforces itself (IDC_START_BTN handler), not something read from here at
-            // all. Shown, not editable, purely so the fixed value is visible rather than silently
-            // implicit.
-            mk(L"EDIT", L"3", WS_BORDER | WS_DISABLED, 350, 265, 45, 22, IDC_FPS_BROADCAST_EDIT);
+            mk(L"STATIC", L"FPS:", 0, 270, 268, 75, 18, 0);
+            // Selezionabile tra 3, 5, 7 (CBS_DROPDOWNLIST: nessun testo libero) — questa modalità
+            // non ha AIMD da cui adattare un fps (nessun canale di feedback), quindi resta un
+            // piccolo insieme di valori sicuri predefiniti invece di un unico valore forzato.
+            // L'altezza (100) include lo spazio per la lista a tendina aperta — quirk di Win32,
+            // la finestra visibile a riposo resta comunque alta quanto un EDIT singola riga.
+            {
+                HWND fps_bc = mk(L"COMBOBOX", L"", WS_BORDER | CBS_DROPDOWNLIST, 350, 265, 55, 100,
+                                  IDC_FPS_BROADCAST_EDIT);
+                SendMessageW(fps_bc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"3"));
+                SendMessageW(fps_bc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"5"));
+                SendMessageW(fps_bc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"7"));
+                SendMessageW(fps_bc, CB_SETCURSEL, 0, 0); // default: 3
+            }
             mk(L"STATIC", L"Chunk (byte):", 0, 270, 292, 85, 18, 0);
             // Same "bytes of file payload per QR" meaning as the Bidirezionale group's own Chunk
             // max field, just a separate control (own default 180) so switching modes never leaves
@@ -385,10 +392,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int loops = static_cast<int>(GetDlgItemInt(hwnd, IDC_LOOPS_EDIT, nullptr, FALSE));
 
                 if (broadcast_mode) {
-                    // Fixed per explicit user request (2026-07-06) — BroadcastConfig has no AIMD
-                    // to ramp this from, so it's hard-coded here rather than read from IDC_FPS_EDIT
-                    // (that field belongs to the Bidirezionale group and is disabled in this mode).
-                    fps = 3.0;
+                    // Read from the Unidirezionale group's own combobox (3/5/7), not IDC_FPS_EDIT
+                    // (that field belongs to the Bidirezionale group and is disabled in this mode)
+                    // — BroadcastConfig has no AIMD to ramp this from, so it's one of a small,
+                    // known-safe preset choices instead of arbitrary free text.
+                    wchar_t fps_bc_buf[8];
+                    GetDlgItemTextW(hwnd, IDC_FPS_BROADCAST_EDIT, fps_bc_buf, 8);
+                    fps = wcstod(fps_bc_buf, nullptr);
+                    if (fps <= 0.0) fps = 3.0;
                     // Multi-QR-per-frame batching isn't compatible with the broadcast sender, which
                     // never listens for anything: a batch that didn't fill would never get flushed
                     // to screen at all (see OpticalLink::try_receive_multi()'s flush-on-poll logic

@@ -38,7 +38,7 @@ struct AppWidgets {
     GtkWidget* fps_entry = nullptr;           // bidirezionale
     GtkWidget* qrgrid_entry = nullptr;        // bidirezionale
     GtkWidget* chunkmax_entry = nullptr;      // bidirezionale
-    GtkWidget* fps_broadcast_entry = nullptr; // unidirezionale — always insensitive, shows "3"
+    GtkWidget* fps_broadcast_entry = nullptr; // unidirezionale — GtkComboBoxText, 3/5/7
     GtkWidget* chunksize_entry = nullptr;     // unidirezionale
     GtkWidget* loops_entry = nullptr;         // unidirezionale
     GtkWidget* start_button = nullptr;
@@ -121,14 +121,23 @@ void RunTransferThread(qrtp::GuiTransferParams params) {
 
 std::string EntryText(GtkWidget* entry) { return gtk_entry_get_text(GTK_ENTRY(entry)); }
 
+// gtk_combo_box_text_get_active_text() returns a newly-allocated gchar* the caller must g_free();
+// this wraps that into an ordinary std::string so call sites don't have to manage it by hand.
+std::string ComboText(GtkWidget* combo) {
+    gchar* text = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
+    std::string out = text ? text : "";
+    g_free(text);
+    return out;
+}
+
 // Grays out whichever mode-specific parameter group doesn't apply to the currently-selected mode
-// — same role as gui_win32.cpp's UpdateModeUI. fps_broadcast_entry is never touched here: it's
-// permanently insensitive (set once at creation), purely displaying the fixed value.
+// — same role as gui_win32.cpp's UpdateModeUI.
 void UpdateModeUI() {
     const bool broadcast = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app->radio_broadcast));
     gtk_widget_set_sensitive(g_app->fps_entry, !broadcast);
     gtk_widget_set_sensitive(g_app->qrgrid_entry, !broadcast);
     gtk_widget_set_sensitive(g_app->chunkmax_entry, !broadcast);
+    gtk_widget_set_sensitive(g_app->fps_broadcast_entry, broadcast);
     gtk_widget_set_sensitive(g_app->chunksize_entry, broadcast);
     gtk_widget_set_sensitive(g_app->loops_entry, broadcast);
 }
@@ -168,12 +177,14 @@ void OnStartClicked(GtkButton*, gpointer) {
     params.broadcast_mode = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_app->radio_broadcast));
     params.camera_index = std::atoi(EntryText(g_app->camera_entry).c_str());
 
-    // Bidirezionale reads its own FPS field (an AIMD starting point); Unidirezionale is fixed to
-    // 3.0 per explicit user request, never read from a field at all — the Unidirezionale group's
-    // own FPS field is permanently insensitive, purely displaying "3" (matches gui_win32.cpp).
+    // Bidirezionale reads its own FPS field (an AIMD starting point); Unidirezionale reads its own
+    // combobox (3/5/7, not free text — BroadcastConfig has no AIMD to ramp this from, so it's a
+    // small set of known-safe presets instead, matches gui_win32.cpp).
     double fps = std::atof(EntryText(g_app->fps_entry).c_str());
     if (fps <= 0.0) fps = 3.0;
-    params.fps = params.broadcast_mode ? 3.0 : fps;
+    double fps_broadcast = std::atof(ComboText(g_app->fps_broadcast_entry).c_str());
+    if (fps_broadcast <= 0.0) fps_broadcast = 3.0;
+    params.fps = params.broadcast_mode ? fps_broadcast : fps;
 
     // "max"/blank -> auto-detect the camera's highest mode; "0x0" -> leave the camera fully
     // alone; any other "WxH" -> request that specific resolution. See
@@ -406,13 +417,15 @@ int main(int argc, char** argv) {
     gtk_container_set_border_width(GTK_CONTAINER(broadcast_grid), 8);
     gtk_container_add(GTK_CONTAINER(broadcast_frame), broadcast_grid);
 
-    // Always insensitive — this mode has no AIMD to adapt fps from at all, so per explicit user
-    // request it's hard-coded in OnStartClicked, not read from here. Shown, not editable, purely
-    // so the fixed value is visible rather than silently implicit.
-    g_app->fps_broadcast_entry = gtk_entry_new();
-    gtk_entry_set_text(GTK_ENTRY(g_app->fps_broadcast_entry), "3");
-    gtk_widget_set_sensitive(g_app->fps_broadcast_entry, FALSE);
-    gtk_grid_attach(GTK_GRID(broadcast_grid), gtk_label_new("FPS (fisso):"), 0, 0, 1, 1);
+    // Selezionabile tra 3, 5, 7 (non testo libero) — questa modalità non ha AIMD da cui adattare
+    // un fps, quindi resta un piccolo insieme di valori sicuri predefiniti invece di un unico
+    // valore forzato o testo libero arbitrario.
+    g_app->fps_broadcast_entry = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(g_app->fps_broadcast_entry), "3");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(g_app->fps_broadcast_entry), "5");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(g_app->fps_broadcast_entry), "7");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(g_app->fps_broadcast_entry), 0); // default: 3
+    gtk_grid_attach(GTK_GRID(broadcast_grid), gtk_label_new("FPS:"), 0, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(broadcast_grid), g_app->fps_broadcast_entry, 1, 0, 1, 1);
 
     g_app->chunksize_entry = gtk_entry_new();

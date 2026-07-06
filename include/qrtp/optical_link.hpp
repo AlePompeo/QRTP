@@ -1,6 +1,7 @@
 #pragma once
 #ifdef QRTP_WITH_OPENCV
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -131,6 +132,13 @@ struct OpticalLinkConfig {
     // "models/wechat_qrcode" folder next to the running executable, matching how libqrencode.dll
     // is expected next to qrtp.exe (see qr_encoder.cpp) — set explicitly to point elsewhere.
     std::string wechat_qrcode_model_dir;
+    // Optional: the same cooperative-cancellation flag already passed to ProtocolConfig::cancel/
+    // BroadcastConfig::cancel (checked at Sender/Receiver/BroadcastSender/BroadcastReceiver's own
+    // checkpoints) — set here too so OpticalLink can draw a clickable on-screen "STOP" button on
+    // the outgoing QR window (see send()/flush_send_batch()) and set this flag directly when
+    // clicked, without needing any new signaling path. Left nullptr (default), no button is drawn
+    // or wired at all — e.g. plain CLI usage with no GUI/cancel flag to control.
+    std::atomic<bool>* cancel = nullptr;
 };
 
 // The real physical layer: send() renders a QR frame to an on-screen window; try_receive() polls
@@ -156,6 +164,10 @@ public:
     void set_ec_level(ECLevel level) override;
 
 private:
+    // cv::setMouseCallback needs a plain C-style function pointer (optical_link.cpp's
+    // on_out_window_mouse), which forwards straight into handle_stop_button_click() below.
+    friend void on_out_window_mouse(int, int, int, int, void*);
+
     // The experimental multi-QR-per-frame path (see OpticalLinkConfig::qr_codes_per_frame) —
     // send()/try_receive() dispatch to these only when that's >1; otherwise they run their
     // original bodies untouched. Kept as clearly separate methods rather than branches threaded
@@ -205,6 +217,13 @@ private:
     // forcing a partial batch onto the screen alone — see try_receive_multi() in optical_link.cpp.
     int pending_size_at_last_poll_ = 0;
     int pending_stall_polls_ = 0;
+
+    // On-screen "STOP" button overlaid on out_window_name_ (top-right corner) — only drawn/wired
+    // when cfg_.cancel is set (see OpticalLinkConfig::cancel). Rect computed once in the ctor from
+    // screen_w_, since the window itself never moves/resizes for the whole session.
+    int stop_btn_x0_ = 0, stop_btn_y0_ = 0, stop_btn_x1_ = 0, stop_btn_y1_ = 0;
+    void draw_stop_button(void* canvas); // cv::Mat*, kept opaque so this header stays OpenCV-free
+    void handle_stop_button_click(int x, int y);
 };
 
 } // namespace qrtp

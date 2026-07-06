@@ -16,16 +16,20 @@ namespace qrtp {
 
 struct BroadcastConfig {
     // Fixed for the whole session — there is no feedback channel for an AIMD controller
-    // (adaptive.hpp) to adapt on, unlike the bidirectional Sender/Receiver.
-    size_t chunk_size = 180; // bytes of file payload per DATA frame
+    // (adaptive.hpp) to adapt on, unlike the bidirectional Sender/Receiver. Also the source-block
+    // size for the LT fountain code (see fountain.hpp) BroadcastSender/BroadcastReceiver use.
+    size_t chunk_size = 180; // bytes of file payload per source block / DATA frame
     // Higher than the bidirectional default (ECLevel::M): there is no retransmission safety net
-    // here, so a QR that fails to decode isn't retried until the sender's next full loop — more
-    // per-QR redundancy directly trades for a better chance each individual read succeeds.
+    // here, so a QR that fails to decode isn't retried until later symbols happen to resolve it —
+    // more per-QR redundancy directly trades for a better chance each individual read succeeds.
     ECLevel ec_level = ECLevel::Q;
     double fps = 10.0;
-    // How many full passes over the file BroadcastSender::send_file() makes before returning on
-    // its own; 0 means loop indefinitely until cancelled — the natural default for a continuous
-    // broadcast/kiosk-style transmission with no return channel to ever signal "done, stop".
+    // Caps how many encoded symbols BroadcastSender::send_file() generates before returning on its
+    // own, as a multiple of the file's block count K (i.e. loops=5 stops after ~5*K symbols — the
+    // same order-of-magnitude redundancy the old "N full passes over the file" scheme meant, just
+    // expressed in the fountain code's own unit); 0 means generate indefinitely until cancelled —
+    // the natural default for a continuous broadcast/kiosk-style transmission with no return
+    // channel to ever signal "done, stop".
     int loops = 0;
     std::function<void(const std::string&)> log;
     std::atomic<bool>* cancel = nullptr;
@@ -37,12 +41,13 @@ struct BroadcastResult {
 };
 
 // One-way (simplex) transfer, coexisting with the bidirectional Sender/Receiver (protocol.hpp):
-// the sender repeatedly displays the whole file as a sequence of QR codes with no expectation of,
-// or ability to receive, any reply. Reliability comes entirely from repetition instead of ARQ:
-// send_file() loops the whole file (a header frame with filename/size/hash, then every chunk)
-// either forever or a fixed number of times; BroadcastReceiver assembles whatever it manages to
-// capture across one or more of those loops, finishing the moment it has the complete file with a
-// verified SHA-256 hash — it never needs the sender's current loop to finish first.
+// the sender repeatedly displays the file as a sequence of QR codes with no expectation of, or
+// ability to receive, any reply. Reliability comes from an LT fountain code (see fountain.hpp),
+// not ARQ: send_file() emits a header frame (filename/size/hash) followed by a potentially endless
+// stream of encoded symbols (XOR combinations of the file's source blocks); BroadcastReceiver
+// finishes the moment it has received *any sufficient number* of symbols to reconstruct every
+// block — never needing any specific symbol, or the sender's current pass to finish first, unlike
+// the plain repeat-the-whole-file-in-order scheme this replaced.
 class BroadcastSender {
 public:
     BroadcastSender(ILink& link, BroadcastConfig cfg);

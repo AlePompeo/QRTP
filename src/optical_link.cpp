@@ -186,6 +186,18 @@ struct CaptureThread {
 CaptureThread* capture_thread(void* p) { return reinterpret_cast<CaptureThread*>(p); }
 } // namespace
 
+// Not in the anonymous namespace above: the header's `friend` declaration (see optical_link.hpp)
+// needs to name the exact same function, which requires it to live directly in qrtp::, not
+// qrtp::(anonymous namespace):: — those are distinct identities as far as friend lookup is
+// concerned, even within the same translation unit.
+//
+// cv::setMouseCallback requires a plain C-style function pointer, not a capturing lambda/member
+// function — this just forwards to the OpticalLink instance passed as userdata.
+void on_out_window_mouse(int event, int x, int y, int, void* userdata) {
+    if (event != cv::EVENT_LBUTTONDOWN) return;
+    reinterpret_cast<OpticalLink*>(userdata)->handle_stop_button_click(x, y);
+}
+
 OpticalLink::OpticalLink(OpticalLinkConfig cfg)
     : cfg_(cfg), out_window_name_("QRTP - invio (mostra questo alla fotocamera dell'altro PC)"),
       camera_window_name_("QRTP - anteprima fotocamera locale") {
@@ -227,6 +239,27 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
     // point of this window is that a camera on the other machine has to be able to read it
     // continuously, so it must never end up hidden behind something else.
     cv::setWindowProperty(out_window_name_, cv::WND_PROP_TOPMOST, 1);
+
+    // Optional "STOP" button overlaid on this same window (see draw_stop_button()) — since this
+    // window is topmost and roughly full-screen, the GUI's own control panel (with its own
+    // "Ferma" button) can end up hidden behind it, so this gives an always-reachable way to
+    // interrupt right where the QR itself is showing. Only wired if the caller actually provided
+    // a cancel flag (see OpticalLinkConfig::cancel) — plain CLI usage without one just doesn't
+    // get a button drawn or a callback registered at all. Rect fixed for the whole session: the
+    // QR content is always centered with at least a 5% margin of the screen's smaller dimension
+    // (send()'s own `target = 0.9 * min(screen_w_, screen_h_)`), so a modest button in the
+    // absolute top-right corner stays in that white padding on any realistic screen — could
+    // still nick the outer quiet zone (not the finder pattern itself) on an unusually small/
+    // square display; not verified on real hardware, flagged rather than solved with more
+    // elaborate adaptive positioning.
+    if (cfg_.cancel) {
+        constexpr int kBtnW = 120, kBtnH = 36, kMargin = 8;
+        stop_btn_x1_ = screen_w_ - kMargin;
+        stop_btn_x0_ = stop_btn_x1_ - kBtnW;
+        stop_btn_y0_ = kMargin;
+        stop_btn_y1_ = stop_btn_y0_ + kBtnH;
+        cv::setMouseCallback(out_window_name_, on_out_window_mouse, this);
+    }
 
 #ifdef _WIN32
     // DirectShow is the well-known reliable backend for opening a webcam by index on Windows —
@@ -401,6 +434,28 @@ void OpticalLink::set_fps(double fps) { cfg_.fps = fps; }
 
 void OpticalLink::set_ec_level(ECLevel level) { cfg_.ec_level = static_cast<QrEcLevel>(static_cast<uint8_t>(level)); }
 
+void OpticalLink::draw_stop_button(void* canvas_ptr) {
+    if (!cfg_.cancel) return;
+    cv::Mat& canvas = *screen_canvas(canvas_ptr);
+    const cv::Point p0(stop_btn_x0_, stop_btn_y0_);
+    const cv::Point p1(stop_btn_x1_, stop_btn_y1_);
+    // canvas is single-channel (grayscale) — same type as the QR image itself (see send()), so
+    // just a light-gray fill with a black border/label rather than a color that wouldn't mean
+    // anything on this Mat type anyway.
+    cv::rectangle(canvas, p0, p1, cv::Scalar(210), cv::FILLED);
+    cv::rectangle(canvas, p0, p1, cv::Scalar(0), 2);
+    cv::putText(canvas, "STOP", cv::Point(stop_btn_x0_ + 14, stop_btn_y0_ + 24), cv::FONT_HERSHEY_SIMPLEX, 0.7,
+                cv::Scalar(0), 2);
+}
+
+void OpticalLink::handle_stop_button_click(int x, int y) {
+    if (!cfg_.cancel) return;
+    if (x >= stop_btn_x0_ && x <= stop_btn_x1_ && y >= stop_btn_y0_ && y <= stop_btn_y1_) {
+        cfg_.cancel->store(true);
+        if (cfg_.log) cfg_.log("[optical] STOP button clicked -- cancelling");
+    }
+}
+
 void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     if (cfg_.qr_codes_per_frame > 1) {
         send_multi(frame_bytes);
@@ -460,6 +515,7 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     // the last (AIMD-driven) without ever needing to move or resize the window, or re-filling the
     // whole canvas white unless that size actually changed.
     show_padded(*screen_canvas(out_canvas_), last_content_w_, last_content_h_, screen_w_, screen_h_, img);
+    draw_stop_button(out_canvas_);
     cv::imshow(out_window_name_, *screen_canvas(out_canvas_));
     if (cfg_.log) {
         cfg_.log("[optical] showing QR: version=" + std::to_string(qr.version) + " modules=" +
@@ -635,6 +691,7 @@ void OpticalLink::flush_send_batch() {
     // this grid onto it instead of resizing/moving the window, or reallocating/re-filling a new
     // canvas, to match it.
     show_padded(*screen_canvas(out_canvas_), last_content_w_, last_content_h_, screen_w_, screen_h_, canvas);
+    draw_stop_button(out_canvas_);
     cv::imshow(out_window_name_, *screen_canvas(out_canvas_));
     if (cfg_.log) {
         cfg_.log("[optical] showing " + std::to_string(n) + " QR(s) in a " + std::to_string(cols) + "x" +

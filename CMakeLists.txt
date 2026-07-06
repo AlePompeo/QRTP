@@ -31,6 +31,7 @@ set(QRTP_CORE_SOURCES
     src/link.cpp
     src/qr_encoder.cpp
     src/protocol.cpp
+    src/fountain.cpp
     src/broadcast.cpp
 )
 
@@ -161,6 +162,7 @@ if(WITH_WASM)
         src/adaptive.cpp
         src/link.cpp
         src/protocol.cpp
+        src/fountain.cpp
         src/broadcast.cpp
         src/qr_encoder_wasm.cpp
         src/wasm_link.cpp
