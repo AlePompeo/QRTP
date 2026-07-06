@@ -1500,3 +1500,31 @@ native Linux GTK3 (`make WITH_OPENCV=1 bin/qrtp_gui`), MinGW Windows cross-compi
 qrtp_web` — no-op here since only `index.html`/no C++ changed for this part), and the native test
 suite (`make WITH_OPENCV=1 bin/qrtp_tests && ./bin/qrtp_tests`, all passing, unaffected since this
 touches no core files).
+
+## Published: v58 (same day)
+
+Committed (`517198b`) and pushed to `main`, then republished as release v58 (tag
+`v0.1.0-windows-preview`, title bumped) with all six distribution assets rebuilt from clean:
+
+- `dist-windows.zip` — MinGW cross-compiled `qrtp.exe`/`qrtp_gui.exe`/`qrtp_tests.exe`
+- `qrtp-linux-x86_64-fedora.tar.gz` — native build in this dev environment, `make clean && make
+  WITH_OPENCV=1 && make test WITH_OPENCV=1 && make bin/qrtp_gui WITH_OPENCV=1`
+- `qrtp-linux-x86_64-{ubuntu2204,ubuntu2404,debian12}.tar.gz` — rebuilt in podman containers, run
+  strictly one at a time this time (not just "not launched concurrently" but with *zero* other
+  host-side activity touching the repo directory while each container held it `:Z`-mounted) —
+  the Ubuntu 24.04 build hit a new variant of the SELinux relabel issue first: it failed with `cp:
+  cannot open '/src-ro/build-wasm/qrtp_web.js': Permission denied` because a WASM rebuild was
+  running on the host *at the same time*, against the very directory tree the container had
+  exclusively relabeled via `:Z`. Confirms the earlier lesson from the v57 release needed
+  restating more strongly: `:Z` isn't just unsafe between two containers sharing a mount, it's
+  unsafe between a container and *any* other process (including the host shell) touching that
+  same directory tree for the container's whole lifetime. Fixed by simply not running anything
+  else against the repo until each container finished. Ubuntu 22.04 also hit the already-known
+  apt "Release file ... not valid yet" clock-skew rejection on first attempt; reused the
+  `-o Acquire::Check-Date=false` fix from the Debian 12 build in the v57 release.
+- `qrtp-web.zip` — refreshed WASM build + web assets (the actual fix, `web/main.js`, plus the
+  extended FPS `<select>`), still binary-only, README.txt's changelog updated for this version
+
+All four Linux rebuilds' own test suites passed inside their respective containers/native
+environment before packaging. `web/roundtrip_test.mjs`'s 4 scenarios (2 classic + 2 experimental
+color-multiplex) re-run clean against the rebuilt WASM module.
