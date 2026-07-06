@@ -618,14 +618,45 @@ void OpticalLink::flush_send_batch() {
     }
     cv::waitKey(static_cast<int>(1000.0 / std::max(1.0, cfg_.fps)));
     pending_send_batch_.clear();
+    pending_size_at_last_poll_ = 0;
+    pending_stall_polls_ = 0;
 }
 
 bool OpticalLink::try_receive_multi(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) {
     using Clock = std::chrono::steady_clock;
-    // A batch send() queued but didn't fill (e.g. the window-fill loop ran out of new offsets
-    // before reaching qr_codes_per_frame) must actually reach the screen before we start waiting
-    // for a reply to it — same invariant the classic path gets for free by rendering immediately.
-    flush_send_batch();
+    // A partial batch (fewer than qr_codes_per_frame queued) gets a few polls' worth of grace to
+    // fill up naturally — e.g. the Sender's next window-fill round, or the Receiver's next SACK —
+    // instead of being forced onto the screen alone the instant this happens to be called. Flushing
+    // unconditionally here (the original behavior) made the actual on-screen grid size come down to
+    // "however many happened to queue before the next unrelated poll," not the requested
+    // qr_codes_per_frame: on the Receiver side specifically, with the default sack_every_n_frames=1,
+    // send_sack() is called at most once per loop iteration and try_receive() (which flushed) was
+    // called once per iteration too, *before* that iteration's own send_sack() — so a second SACK
+    // could never accumulate in time, and every "batch" was really just 1, regardless of
+    // qr_codes_per_frame (reported: grids inconsistently showing 1 or 2 QR codes with
+    // qr_codes_per_frame=2 configured on both sides).
+    //
+    // Bounded (kMaxStallPolls) so a genuinely final, unpaired straggler (end of file, or a window
+    // that stays saturated with nothing new to send) still can't wait forever — same no-hang
+    // guarantee the old unconditional flush provided, just not on the very first poll after
+    // something is queued.
+    if (!pending_send_batch_.empty()) {
+        // Kept small: the pairing fix above only actually relies on the "grew since last poll"
+        // branch (a genuinely accumulating batch never falls into this counter at all); this
+        // threshold only bounds how long a batch that's *stopped* growing (a one-off control frame
+        // like SYN/ACK/FIN that nothing will ever pair with, or a genuine end-of-data straggler)
+        // waits before being shown alone.
+        constexpr int kMaxStallPolls = 2;
+        const int pending_size = static_cast<int>(pending_send_batch_.size());
+        if (pending_size != pending_size_at_last_poll_) {
+            // Grew (or shrank, though it never does outside flush_send_batch()) since the last
+            // poll — still actively filling up, give it more time instead of flushing it alone.
+            pending_size_at_last_poll_ = pending_size;
+            pending_stall_polls_ = 0;
+        } else if (++pending_stall_polls_ >= kMaxStallPolls) {
+            flush_send_batch(); // also resets both counters back to 0
+        }
+    }
 
     if (!pending_decoded_.empty()) {
         out = std::move(pending_decoded_.front());

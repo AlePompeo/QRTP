@@ -548,3 +548,48 @@ corruption, hash verified) exercising #1 directly, and a full MinGW cross-compil
 warnings (`qrtp.exe`/`qrtp_gui.exe`/`qrtp_tests.exe`), `dist-windows.zip` refreshed. **#2 and #3 not
 verified on real camera hardware** — same standing caveat as every other optical-layer change in
 this log.
+
+## Fixed qr_codes_per_frame showing inconsistent grid sizes (1 vs N) (2026-07-06, same day)
+
+**Symptom**: user report — with `qr_codes_per_frame=2` set on *both* sender and receiver, the
+displayed grid sometimes showed 2 QR codes, sometimes just 1, with no obvious pattern.
+
+**Root cause, two distinct paths converging on the same effect** (`optical_link.cpp`):
+`try_receive_multi()` called `flush_send_batch()` unconditionally on every single invocation, even
+when only 1 QR had been queued so far — the comment justifying this ("a batch must reach the
+screen before waiting for a reply, or it stalls forever") is correct, but flushing *immediately*,
+every time, meant the actual on-screen grid size came down to "however many happened to queue
+before the next unrelated poll," not the requested `qr_codes_per_frame`.
+
+1. **Receiver side (the dominant cause)**: with the default `sack_every_n_frames=1`, `send_sack()`
+   is called at most once per loop iteration, and `try_receive()` (which flushed) is called once
+   per iteration too — *before* that same iteration's own `send_sack()` call. A second SACK could
+   therefore never accumulate in the pending batch before being force-flushed: every "batch" on the
+   receiver's own display was really just 1, regardless of `qr_codes_per_frame`.
+2. **Sender side**: the window-fill loop's per-round count of *new* sends has no relationship to
+   `qr_codes_per_frame` — it's however many window slots happen to be free that round (an ARQ
+   dynamic), so it's frequently not a multiple of 2, leaving an odd leftover that got force-flushed
+   alone.
+
+**Fix**: `try_receive_multi()` no longer flushes a partial batch on sight. It now tracks the pending
+batch's size across polls (`pending_size_at_last_poll_`) and only force-flushes once it's
+*genuinely stopped growing* for `kMaxStallPolls` (2) consecutive polls — a batch that's still
+actively filling up (the common case: the very next `send_sack()`/window-fill send arrives before
+the next poll) is never touched by the counter at all, since it always falls into the "grew since
+last poll" branch instead. Bounded specifically so a one-off control frame nothing will ever pair
+with (SYN/ACK/FIN) or a genuine end-of-data straggler still can't wait forever — same no-hang
+guarantee the old unconditional flush provided, just not on the very first poll after something is
+queued. `flush_send_batch()` resets both counters wherever it's called from (either this stall path
+or `send_multi()`'s own "batch is full" check), keeping the two in sync regardless of which
+triggered it.
+
+**Verified**: no OpenCV/camera needed for the core logic, since it's pure integer bookkeeping — a
+standalone simulation of the exact call patterns confirmed the fix: the Receiver's one-send-per-
+iteration pattern (10 sequential single sends) now consistently produces grids of `2 2 2 2 2`
+instead of `1` ten times over; the Sender's variable-odd-count pattern (rounds of 3, 2, 1, 4, 1 new
+sends = 11 items total) produces `2 2 2 2 2 1` — consistent pairs plus exactly one genuine final
+straggler (11 is odd), with nothing left stuck in the pending batch afterward. Also confirmed `make
+test` (native) and a full MinGW cross-compile rebuild with zero warnings.
+(`qrtp.exe`/`qrtp_gui.exe`/`qrtp_tests.exe`), `dist-windows.zip` refreshed. **Not yet confirmed
+end-to-end on real camera hardware** — same standing caveat as every other change to this
+experimental, opt-in path.

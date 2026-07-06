@@ -190,6 +190,10 @@ private:
     std::vector<QrMatrix> pending_send_batch_;       // accumulated by send_multi(), flushed as a grid
     std::deque<std::vector<uint8_t>> pending_decoded_; // decoded payloads not yet returned to the caller
     std::vector<uint32_t> last_decoded_hashes_;      // hashes of the currently-on-screen batch's content
+    // Lets try_receive_multi() tell "still actively filling up" from "genuinely stalled" before
+    // forcing a partial batch onto the screen alone — see try_receive_multi() in optical_link.cpp.
+    int pending_size_at_last_poll_ = 0;
+    int pending_stall_polls_ = 0;
 };
 
 } // namespace qrtp
