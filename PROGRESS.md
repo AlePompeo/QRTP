@@ -1186,3 +1186,31 @@ acceptable, deliberate trade given the medium.
 confirmed by the user on their phone after this specific fix** — the original report is what
 surfaced it, but this exact rebuild hasn't yet been tried against the same real hardware that
 found it.
+
+### Second real-device bug report — camera dropdown stuck on the first-granted camera (same day)
+
+Reported: selecting a different camera from the dropdown, then re-clicking "Richiedi accesso
+camera," left the stream stuck on whichever camera was granted first (front camera on the user's
+phone), with no way to switch.
+
+**Root cause, two compounding bugs**:
+1. The `camPermBtn` click handler called `startCamera()` with no argument at all, every time --
+   `deviceId` was always `undefined`, regardless of whatever the dropdown had selected.
+   `startCamera()`'s own "already on this device" early-return guard
+   (`deviceId === currentCameraDeviceId`) then compared `undefined === undefined` on every
+   subsequent click (since the *first* call had also set `currentCameraDeviceId = undefined`) —
+   true every time, so the stream never actually switched, no matter what was selected.
+2. `populateCameraList()` rebuilds the whole `<select>` (`innerHTML = ""` + re-append), which
+   resets the visible selection to the first option regardless of what's actually streaming --
+   even once bug 1 was fixed, the dropdown's on-screen state would still have silently disagreed
+   with the live camera feed after a switch.
+
+**Fixed**: the click handler now passes `$("camSelect").value` to `startCamera()` (same pattern
+`onStart()` already used), and `populateCameraList()` restores `sel.value = currentCameraDeviceId`
+after rebuilding the option list.
+
+**Verified**: JS syntax check only (`node --check`) — this doesn't touch the WASM module, protocol
+logic, or anything `web/roundtrip_test.mjs` exercises, so that test wasn't re-run; nothing else
+here could meaningfully verify camera-switching behavior short of a real device, which is exactly
+what surfaced both bugs in the first place. Rebuilt `qrtp-web.zip` (still v56, binary refresh) and
+re-uploaded. **Not yet re-confirmed by the user on their phone.**

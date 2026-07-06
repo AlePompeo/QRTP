@@ -107,6 +107,10 @@ async function populateCameraList() {
     opt.textContent = cam.label || `Camera ${sel.length + 1}`;
     sel.appendChild(opt);
   }
+  // Rebuilding the <select> above resets it to the first option regardless of what's actually
+  // streaming -- restore it to the device startCamera() actually opened, so the dropdown doesn't
+  // visually disagree with the live camera feed after a switch.
+  if (currentCameraDeviceId) sel.value = currentCameraDeviceId;
 }
 
 // Optical/hardware zoom via the MediaTrackConstraints "zoom" capability (part of the Image
@@ -323,7 +327,12 @@ async function main() {
 
   $("camPermBtn").addEventListener("click", async () => {
     try {
-      await startCamera();
+      // Read whatever's currently selected in the dropdown -- without this, every click always
+      // requested the browser's default camera (deviceId=undefined), and since startCamera()'s
+      // own "already on this device, no-op" guard compares against currentCameraDeviceId (also
+      // undefined after that first call), re-clicking after picking a different camera did
+      // nothing at all: stuck on whatever camera was granted first.
+      await startCamera($("camSelect").value);
       await populateCameraList();
       log("[camera] accesso concesso");
     } catch (e) {
