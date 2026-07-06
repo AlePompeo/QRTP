@@ -1002,6 +1002,38 @@ prior attempt at forcing one automatically for everyone backfired on one of the 
 (see the entry above), so this is left as an explicit, per-machine, opt-in experiment rather than a
 default this software imposes.
 
+### Re-checked GPU/OpenCL after WeChatQRCode became the default decoder — still not pursued (2026-07-06)
+
+User asked to re-investigate GPU offload now that `cv::wechat_qrcode::WeChatQRCode` (a real CNN:
+SSD detector + super-resolution) is the default decoder — unlike the classic `cv::QRCodeDetector`
+(ruled out above), a neural net is at least conceptually the kind of workload a GPU accelerates.
+
+**Checked whether it's actually steerable to GPU**: read the public header
+(`opencv2/wechat_qrcode.hpp`) and the module's real source
+(`modules/wechat_qrcode/src/detector/ssd_detector.cpp`,
+`modules/wechat_qrcode/src/scale/super_scale.cpp` in opencv_contrib). Neither the `WeChatQRCode`
+class nor its internals expose `setPreferableBackend`/`setPreferableTarget` — both nets are loaded
+with a plain `dnn::readNetFromCaffe(...)` and left at OpenCV dnn's default (`DNN_BACKEND_OPENCV` /
+`DNN_TARGET_CPU`). There is no way to ask this decoder to use GPU/OpenCL through its public API;
+doing it at all would mean patching opencv_contrib's own C++ source to call
+`setPreferableTarget(DNN_TARGET_OPENCL)` after each `readNetFromCaffe()` call, then rebuilding the
+entire custom OpenCV through the existing MinGW cross-compile pipeline — invasive (patching
+vendored third-party code) for an outcome that can't be benchmarked here (no GPU/OpenCL runtime in
+this dev environment, on top of the standing no-camera limitation).
+
+**Not pursued, same conclusion as the original 2026-07-05 entry above, for a new reason this time**:
+even ignoring the access problem, both caffemodels are tiny (well under 1MB each) and run once per
+captured frame at a modest 3-60fps — squarely the "small model, small batch" case where per-call
+GPU dispatch/transfer overhead is a well-documented real risk of a net *slowdown*, not a speedup.
+Every other repeated per-frame operation (grayscale conversion, decode-downscale resize, QR
+render/upscale, the full-screen canvas padding added the same day) is already confirmed
+sub-millisecond in this project's own real-hardware logs — moving any of those to GPU (`cv::UMat`)
+would add transfer/dispatch cost for no measurable gain. Camera capture itself remains USB/driver-
+bound, as already established. **No GPU-offload path in this codebase currently has both (a) an
+accessible hook and (b) a plausible net win** — if this changes, the natural next candidate is
+still WeChatQRCode specifically, but only worth patching if a real hardware profile first shows its
+decode cost as the dominant remaining bottleneck (it may already be fast enough not to matter).
+
 ### The forced 1280x720 camera resolution request helped one machine and hurt the other — reverted (2026-07-05)
 
 **Data** (real two-machine log, same transfer, both sides logging "camera opened"): the sending
