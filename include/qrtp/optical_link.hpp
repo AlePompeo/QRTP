@@ -70,6 +70,17 @@ struct OpticalLinkConfig {
     // whereas autofocus off is a simple on/off UVC control with no numeric value to get wrong — if
     // this doesn't help, exposure is the next, riskier knob to consider.
     bool disable_autofocus = false;
+    // Requests higher camera contrast and zero saturation right after opening, on the same
+    // "ask for an oversized/extreme value and let the driver clamp it" technique already used for
+    // camera_width/camera_height above. Aimed squarely at what actually trips up a QR decoder in
+    // practice: a washed-out, low-contrast capture (dim monitor backlight, glare, ambient light)
+    // blurring the boundary between a dark module and its surrounding quiet zone. Saturation to 0
+    // is safe unconditionally — a QR code is pure black/white, so color information is never useful
+    // input to the detector, only a possible source of chroma noise in the grayscale conversion
+    // CaptureThread::run() does right after capture. Default on per explicit user request
+    // (2026-07-06); still a runtime toggle since some webcams' default contrast is already
+    // well-tuned and pushing it further could clip highlights/shadows on a specific setup.
+    bool enhance_camera_contrast = true;
     // Optional diagnostics from the optical layer itself (distinct from ProtocolConfig::log):
     // whether the camera is detecting any QR content at all, and whether decoded text survives
     // frame validation. Wire it to the same sink as ProtocolConfig::log to see both in one place —
@@ -161,7 +172,6 @@ private:
     std::vector<uint8_t> last_decoded_hash_;
     int screen_w_ = 1000;
     int screen_h_ = 1000;
-    int last_window_side_ = 0; // avoids re-resizing the window on every single frame
     int preview_frame_counter_ = 0; // throttles the local camera-preview imshow (see try_receive)
 
     // Accumulated since the last successful decode, so the "camera read a NEW QR" log line can

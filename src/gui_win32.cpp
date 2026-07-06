@@ -53,6 +53,7 @@ constexpr int IDC_MJPEG_CHECK = 113;
 constexpr int IDC_FOCUS_CHECK = 114;
 constexpr int IDC_WECHAT_CHECK = 115;
 constexpr int IDC_CHUNKMAX_EDIT = 116;
+constexpr int IDC_CONTRAST_CHECK = 117;
 
 // Custom messages posted from the worker thread to the UI thread. Never touch a control directly
 // from the worker thread — Win32 windows are single-threaded-affine, all updates must happen here.
@@ -129,7 +130,7 @@ std::wstring BrowseForFolder(HWND owner) {
 // Runs on the worker thread. Never touches Win32 controls directly.
 void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_index, double fps, int camera_width,
                   int camera_height, int qr_grid, bool request_mjpeg, bool disable_autofocus,
-                  bool use_wechat_qrcode, size_t chunk_max) {
+                  bool use_wechat_qrcode, bool enhance_contrast, size_t chunk_max) {
     HWND hwnd = app->hwnd;
     auto post_log = [hwnd](const std::string& msg) {
         auto* copy = new std::wstring(Utf8ToWide(msg));
@@ -150,6 +151,7 @@ void RunTransfer(AppState* app, bool is_send, std::wstring path_w, int camera_in
         ocfg.request_mjpeg = request_mjpeg;
         ocfg.disable_autofocus = disable_autofocus;
         ocfg.use_wechat_qrcode = use_wechat_qrcode;
+        ocfg.enhance_camera_contrast = enhance_contrast;
         ocfg.log = post_log;
         qrtp::OpticalLink link(ocfg);
 
@@ -253,6 +255,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             mk(L"BUTTON", L"Usa WeChatQRCode (CNN)", BS_AUTOCHECKBOX, 200, 127, 200, 20, IDC_WECHAT_CHECK);
             CheckDlgButton(hwnd, IDC_WECHAT_CHECK, BST_CHECKED);
 
+            // Checked by default (see OpticalLinkConfig::enhance_camera_contrast) — requests higher
+            // camera contrast and zero saturation, aimed at the washed-out/low-contrast captures
+            // that trip up a QR decoder; still a runtime toggle in case a specific camera's default
+            // contrast is already well-tuned.
+            mk(L"BUTTON", L"Migliora contrasto fotocamera", BS_AUTOCHECKBOX, 200, 149, 260, 20, IDC_CONTRAST_CHECK);
+            CheckDlgButton(hwnd, IDC_CONTRAST_CHECK, BST_CHECKED);
+
             mk(L"STATIC", L"Chunk max:", 0, 10, 150, 100, 20, 0);
             // Opt-in override for AdaptiveConfig::chunk_size_max (default 1024, unchanged) — the
             // AIMD's ceiling on how many bytes of file payload a single DATA frame/QR code is
@@ -328,6 +337,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 bool request_mjpeg = IsDlgButtonChecked(hwnd, IDC_MJPEG_CHECK) == BST_CHECKED;
                 bool disable_autofocus = IsDlgButtonChecked(hwnd, IDC_FOCUS_CHECK) == BST_CHECKED;
                 bool use_wechat_qrcode = IsDlgButtonChecked(hwnd, IDC_WECHAT_CHECK) == BST_CHECKED;
+                bool enhance_contrast = IsDlgButtonChecked(hwnd, IDC_CONTRAST_CHECK) == BST_CHECKED;
                 UINT chunk_max = GetDlgItemInt(hwnd, IDC_CHUNKMAX_EDIT, nullptr, FALSE);
                 if (chunk_max == 0) chunk_max = 1024;
 
@@ -341,7 +351,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (app->worker.joinable()) app->worker.join(); // previous run already finished
                 app->worker = std::thread(RunTransfer, app, is_send, path_w, camera_index, fps, camera_width,
                                            camera_height, qr_grid, request_mjpeg, disable_autofocus,
-                                           use_wechat_qrcode, static_cast<size_t>(chunk_max));
+                                           use_wechat_qrcode, enhance_contrast, static_cast<size_t>(chunk_max));
             } else if (id == IDC_STOP_BTN) {
                 app->cancel.store(true);
                 SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS_STATIC), L"Arresto in corso...");

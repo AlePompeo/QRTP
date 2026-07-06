@@ -32,7 +32,7 @@ void print_usage() {
 #ifdef QRTP_WITH_OPENCV
         "  qrtp send <file> [--camera N] [--fps F] [--width W --height H] [--qr-grid N] [--no-mjpeg]\n"
         "                   [--lock-focus] [--no-wechat-qrcode] [--wechat-model-dir DIR]\n"
-        "                   [--chunk-max N]\n"
+        "                   [--no-contrast-boost] [--chunk-max N]\n"
         "      Send over the real optical link: renders QR frames to a window and reads\n"
         "      ACKs/SACKs back from camera index N (the peer's screen must face this camera).\n"
         "      --qr-grid N (default 1, classic/original behavior) batches N frames into a single\n"
@@ -68,6 +68,10 @@ void print_usage() {
         "      exchange for (unverified end-to-end on real hardware) better detection of small/\n"
         "      blurry/angled codes. Pass --no-wechat-qrcode to use the classic detector instead; must\n"
         "      be set the same on both sides either way.\n"
+        "      Requests higher camera contrast and zero saturation by default, aimed at washed-out/\n"
+        "      low-contrast captures that trip up a QR decoder (dim monitor backlight, glare,\n"
+        "      ambient light). Pass --no-contrast-boost to leave the camera's own contrast/\n"
+        "      saturation settings untouched, if a specific camera is already well-tuned.\n"
         "      --chunk-max N overrides AdaptiveConfig::chunk_size_max (default 1024 bytes of file\n"
         "      payload per DATA frame — the AIMD's ceiling on how dense a QR code's payload is\n"
         "      allowed to grow to). Higher values pack more bytes per QR (fewer QR codes needed for\n"
@@ -78,9 +82,10 @@ void print_usage() {
         "      to fit any QR version. Must be set the same on both sides of the transfer.\n\n"
         "  qrtp receive --out <dir> [--camera N] [--fps F] [--width W --height H] [--qr-grid N]\n"
         "                          [--no-mjpeg] [--lock-focus] [--no-wechat-qrcode]\n"
-        "                          [--wechat-model-dir DIR] [--chunk-max N]\n"
+        "                          [--wechat-model-dir DIR] [--no-contrast-boost] [--chunk-max N]\n"
         "      Receive over the real optical link. Same --width/--height, --qr-grid, --no-mjpeg,\n"
-        "      --lock-focus, --no-wechat-qrcode, --wechat-model-dir and --chunk-max notes as above.\n");
+        "      --lock-focus, --no-wechat-qrcode, --wechat-model-dir, --no-contrast-boost and\n"
+        "      --chunk-max notes as above.\n");
 #else
         "  qrtp send / qrtp receive\n"
         "      Not available in this build — rebuild with `make WITH_OPENCV=1` after\n"
@@ -178,6 +183,7 @@ int cmd_send_optical(int argc, char** argv) {
         else if (a == "--lock-focus") ocfg.disable_autofocus = true;
         else if (a == "--no-wechat-qrcode") ocfg.use_wechat_qrcode = false;
         else if (a == "--wechat-model-dir" && i + 1 < argc) ocfg.wechat_qrcode_model_dir = argv[++i];
+        else if (a == "--no-contrast-boost") ocfg.enhance_camera_contrast = false;
         else if (a == "--chunk-max" && i + 1 < argc) chunk_max_override = static_cast<size_t>(std::stoul(argv[++i]));
     }
     try {
@@ -211,6 +217,7 @@ int cmd_receive_optical(int argc, char** argv) {
         else if (a == "--lock-focus") ocfg.disable_autofocus = true;
         else if (a == "--no-wechat-qrcode") ocfg.use_wechat_qrcode = false;
         else if (a == "--wechat-model-dir" && i + 1 < argc) ocfg.wechat_qrcode_model_dir = argv[++i];
+        else if (a == "--no-contrast-boost") ocfg.enhance_camera_contrast = false;
         else if (a == "--chunk-max" && i + 1 < argc) chunk_max_override = static_cast<size_t>(std::stoul(argv[++i]));
         else if (a == "--out" && i + 1 < argc) out_dir = argv[++i];
     }

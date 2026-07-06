@@ -73,6 +73,24 @@ cv::Mat downscale_for_decode(const cv::Mat& gray) {
     return small;
 }
 
+// Centers `img` on a canvas exactly the display's screen resolution (or larger, only in the rare
+// case img itself is already bigger — never crops). This is what lets out_window_name_ stay fixed
+// at the full screen size for the entire session (see the ctor) instead of being resized/moved to
+// match whatever the current QR happens to render at: every frame becomes a single 1:1 pixel copy
+// into a same-sized canvas, so the window never has to stretch the image itself (stretching a
+// non-matching aspect ratio would distort the QR's square modules, exactly what a decoder can't
+// tolerate) and never has to move/resize on screen, which would otherwise happen every time the
+// AIMD controller changes QR version mid-transfer.
+cv::Mat pad_to_screen(const cv::Mat& img, int screen_w, int screen_h) {
+    const int canvas_w = std::max(screen_w, img.cols);
+    const int canvas_h = std::max(screen_h, img.rows);
+    cv::Mat canvas(canvas_h, canvas_w, img.type(), cv::Scalar(255));
+    const int off_x = (canvas_w - img.cols) / 2;
+    const int off_y = (canvas_h - img.rows) / 2;
+    img.copyTo(canvas(cv::Rect(off_x, off_y, img.cols, img.rows)));
+    return canvas;
+}
+
 // Captures frames continuously in the background so try_receive() never has to block on
 // cap->read() itself — it just picks up whatever the latest ready frame is. Only ever touches the
 // camera (cap->read) and does a color-space conversion (cv::cvtColor); no HighGUI call
@@ -160,6 +178,20 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
     cv::resizeWindow(camera_window_name_, 480, 360);
     cv::moveWindow(camera_window_name_, 20, 20);
 
+    // Fixed at the full screen resolution, for the entire session — not OS-level exclusive
+    // fullscreen (WND_PROP_FULLSCREEN), which hands display/compositor control away from the
+    // window manager and can fight with alt-tab or a second monitor; this stays an ordinary,
+    // decorated WINDOW_NORMAL window that simply happens to be sized to cover the whole screen.
+    // send()/flush_send_batch() pad every frame onto a same-sized canvas (see pad_to_screen above)
+    // instead of resizing this window to match the QR's own size, so it never needs to move or
+    // resize again after this.
+    cv::resizeWindow(out_window_name_, screen_w_, screen_h_);
+    cv::moveWindow(out_window_name_, 0, 0);
+    // Keeps the QR visible even if the user clicks into another window mid-transfer — the whole
+    // point of this window is that a camera on the other machine has to be able to read it
+    // continuously, so it must never end up hidden behind something else.
+    cv::setWindowProperty(out_window_name_, cv::WND_PROP_TOPMOST, 1);
+
 #ifdef _WIN32
     // DirectShow is the well-known reliable backend for opening a webcam by index on Windows —
     // OpenCV's default auto-selected backend (Media Foundation) is markedly slower to open and
@@ -241,6 +273,17 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
         cap(capture_)->set(cv::CAP_PROP_AUTOFOCUS, 0);
     }
 
+    // Default on (see OpticalLinkConfig::enhance_camera_contrast) — same "ask for an oversized/
+    // extreme value and let the driver clamp it" technique as the resolution request below, applied
+    // here to contrast instead of pixel dimensions. Ordered with BUFFERSIZE/FOURCC/AUTOFOCUS above,
+    // before the resolution request, for the same reason those are: some backends renegotiate more
+    // freely before a resolution request locks things in.
+    if (cfg_.enhance_camera_contrast) {
+        constexpr double kOversizedProp = 1000.0; // comfortably beyond any driver's real max/min
+        cap(capture_)->set(cv::CAP_PROP_CONTRAST, kOversizedProp);
+        cap(capture_)->set(cv::CAP_PROP_SATURATION, 0.0);
+    }
+
     // Three modes, by default requesting the camera's highest available mode automatically
     // (kAutoMaxResolution): OpenCV's base VideoCapture interface has no portable "list supported
     // resolutions" call (that's backend-specific, e.g. DirectShow's IAMStreamConfig, real COM
@@ -282,7 +325,11 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
                   " fourcc=" + std::string(fourcc_chars) +
                   (cfg_.request_mjpeg ? " (mjpeg requested)" : " (mjpeg not requested)") +
                   (cfg_.disable_autofocus ? " (autofocus disabled)" : " (autofocus left on)") +
-                  (cfg_.use_wechat_qrcode ? " (decoder=WeChatQRCode)" : " (decoder=classic)"));
+                  (cfg_.use_wechat_qrcode ? " (decoder=WeChatQRCode)" : " (decoder=classic)") +
+                  (cfg_.enhance_camera_contrast
+                       ? " (contrast boosted: contrast=" + std::to_string(cap(capture_)->get(cv::CAP_PROP_CONTRAST)) +
+                             " saturation=" + std::to_string(cap(capture_)->get(cv::CAP_PROP_SATURATION)) + ")"
+                       : " (contrast left at default)"));
     }
 
     capture_thread_ = new CaptureThread(cap(capture_));
@@ -351,19 +398,14 @@ void OpticalLink::send(const std::vector<uint8_t>& frame_bytes) {
     cv::resize(small, img, cv::Size(side, side), 0, 0, cv::INTER_NEAREST);
     const double render_ms = ms_since(t_render_start);
 
-    if (side != last_window_side_) {
-        // Large and centered, but still a normal decorated window (WINDOW_NORMAL, not
-        // WND_PROP_FULLSCREEN) — "fills the screen" without going full OS-level fullscreen.
-        cv::resizeWindow(out_window_name_, side, side);
-        cv::moveWindow(out_window_name_, (screen_w_ - side) / 2, (screen_h_ - side) / 2);
-        last_window_side_ = side;
-    }
-
     // Shown in its own window (out_window_name_) that nothing else writes to, so it stays on
     // screen exactly as-is — for as long as it takes the other side to read it, not just for this
     // call's brief waitKey — until the next real send() replaces it. try_receive()'s camera-preview
-    // updates happen in a completely separate window, so they can never race with this.
-    cv::imshow(out_window_name_, img);
+    // updates happen in a completely separate window, so they can never race with this. Padded onto
+    // a full-screen canvas (see pad_to_screen) since the window itself is fixed at screen_w_ x
+    // screen_h_ for the whole session — this frame's QR can be a different size than the last
+    // (AIMD-driven) without ever needing to move or resize the window.
+    cv::imshow(out_window_name_, pad_to_screen(img, screen_w_, screen_h_));
     if (cfg_.log) {
         cfg_.log("[optical] showing QR: version=" + std::to_string(qr.version) + " modules=" +
                   std::to_string(qr.width) + "x" + std::to_string(qr.width) + " module_px=" +
@@ -530,15 +572,9 @@ void OpticalLink::flush_send_batch() {
         one.copyTo(canvas(cv::Rect(off_x, off_y, sides[i], sides[i])));
     }
 
-    const int canvas_w = canvas.cols, canvas_h = canvas.rows;
-    if (canvas_w != last_window_side_) {
-        cv::resizeWindow(out_window_name_, canvas_w, canvas_h);
-        cv::moveWindow(out_window_name_, std::max(0, (screen_w_ - canvas_w) / 2),
-                        std::max(0, (screen_h_ - canvas_h) / 2));
-        last_window_side_ = canvas_w;
-    }
-
-    cv::imshow(out_window_name_, canvas);
+    // Same fixed full-screen window as the classic path (see send()) — pad this grid onto a
+    // screen_w_ x screen_h_ canvas instead of resizing/moving the window to match it.
+    cv::imshow(out_window_name_, pad_to_screen(canvas, screen_w_, screen_h_));
     if (cfg_.log) {
         cfg_.log("[optical] showing " + std::to_string(n) + " QR(s) in a " + std::to_string(cols) + "x" +
                   std::to_string(rows) + " grid, max_module_px=" + std::to_string(max_scale));
