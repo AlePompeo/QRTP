@@ -968,3 +968,180 @@ Windows execution evidence (not just compile evidence) is wanted.
 `dist-windows.zip` refreshed. **Still not run on real Windows, or under Wine** — the toolchain-level
 fix is a real, verifiable-by-inspection correctness improvement (the PE header now honestly
 reflects the code's actual API floor), but doesn't by itself constitute execution evidence.
+
+## Web/browser port (WebAssembly + zxing-cpp) — new platform target, additive only (2026-07-06, same day)
+
+Asked for a plan for a possible web app port; while scoping it, the request changed to actually
+building it, reusing the existing C++ as much as possible and touching nothing already working.
+The key fact that made this practical: `ILink` (`include/qrtp/link.hpp`) is the *only* boundary
+between the protocol logic and physical I/O — `Sender`/`Receiver` (protocol.cpp) and
+`BroadcastSender`/`BroadcastReceiver` (broadcast.cpp) never depend on `OpticalLink` directly, the
+same reason `LoopbackLink` could validate the whole protocol with no hardware from day one. That
+meant `crc32.cpp`/`sha256.cpp`/`base64.cpp`/`framing.cpp`/`adaptive.cpp`/`link.cpp`/`protocol.cpp`/
+`broadcast.cpp` compile into the WASM build completely unmodified — only two things needed a
+browser-specific replacement, both new files, nothing existing edited:
+
+- **`src/qr_encoder_wasm.cpp`**: same `qr_encode_bytes()` signature as `qr_encoder.hpp` already
+  declares, but statically linking `libqrencode` instead of `qr_encoder.cpp`'s `dlopen` (which
+  doesn't exist in WASM). CMake picks exactly one of the two `.cpp` files per target, same pattern
+  as `gui_win32.cpp` vs `gui_gtk.cpp`.
+- **`src/wasm_link.cpp`**: `JsLink : public ILink`, the browser's physical layer. `send()` base64-
+  encodes the frame (identical wire format to `optical_link.cpp`'s own send()/try_receive(), same
+  reasoning: protocol frames have embedded NUL bytes, base64 sidesteps whether the decoder's
+  string handling is binary-safe), renders via a JS callback, then dwells `1000/fps` ms —
+  mirroring `OpticalLink::send()`'s `cv::waitKey(1000/fps)`, since the ARQ timing depends on
+  send() itself taking about that long. `try_receive()` is the one genuinely new problem: a
+  browser's main thread can't block synchronously waiting for a camera frame without freezing the
+  UI (and the capture loop that would deliver that very frame). Fixed with **Emscripten Asyncify**
+  (`-sASYNCIFY`): `emscripten::val::await()` lets `try_receive()` suspend on a JS Promise and
+  resume when it settles, so `Sender::send_file`/`Receiver::receive_file`'s existing blocking
+  loops work completely unchanged. `WebSession` (embind class) exposes `runSend`/`runReceive`/
+  `runBroadcastSend`/`runBroadcastReceive`/`requestCancel` — thin dispatch to
+  `Sender`/`Receiver`/`BroadcastSender`/`BroadcastReceiver`, same role as `gui_common.cpp`'s
+  `RunGuiTransfer` for the native GUIs, but `gui_common.cpp` itself is untouched (stays under
+  `QRTP_WITH_OPENCV`, irrelevant to this target).
+
+**Decode: zxing-cpp instead of OpenCV.js.** OpenCV.js needs a dedicated Python build script, a
+full OpenCV source tree, manual module selection, and realistic 30-60+ minute builds with real
+Emscripten-version compatibility risk — explicitly pre-authorized to skip in favor of zxing-cpp if
+it looked complex, which it did. zxing-cpp is pure algorithm (no DNN/Caffe dependency like
+`wechat_qrcode`), a direct C++ API (`ZXing::ReadBarcode(ImageView, options)` over a raw pixel
+buffer), and was already confirmed packaged/mature on this distro (`zxing-cpp-devel` via `dnf`,
+2.2.1) even though WASM needs it built from source. `decode_qr_rgba(ptr, width, height)` is
+exposed via embind as a free function, fed a pointer JS has already written captured camera pixels
+into (`Module._malloc` + `HEAPU8.set`) — avoids embind's per-element marshaling on a
+multi-megapixel buffer every polled frame.
+
+**New `web/` directory**: `index.html`/`main.js`/`style.css`, plain JS with no bundler (the
+Emscripten module, built with `-sMODULARIZE=1 -sEXPORT_ES6=1`, imports directly as an ES module).
+UI mirrors `GuiTransferParams` (role, bidirectional/broadcast mode, camera selection via
+`enumerateDevices`, file input for send, Blob download for receive). File I/O needed no native-side
+change at all: `Sender::send_file(path)` already just opens a `std::ifstream` at a path — MEMFS
+(`-sFORCE_FILESYSTEM=1`) makes that transparent, so JS just does `Module.FS.writeFile('/input_file',
+bytes)` from the picked `File` before calling `runSend`. `Receiver`/`BroadcastReceiver` already
+return bytes in memory (no filesystem involved on that side either), returned to JS as a `Uint8Array`
+for a download `Blob`.
+
+**CMake**: new `option(WITH_WASM ...)` block, entirely additive — a new `qrtp_web` executable
+target from a second listing of the same OpenCV-free sources plus the two new files above, built
+with `emcmake cmake -B build-wasm -DWITH_WASM=ON && cmake --build build-wasm --target qrtp_web`
+(the explicit `--target` matters: `qrtp`/`qrtp_tests`/`qrtp_gui` are still defined under an
+Emscripten configure too, since none of that is gated behind `WITH_WASM`). `libqrencode` and
+`zxing-cpp` are fetched as source into `third_party/` (gitignored, git-cloned, not committed —
+same treatment as the Windows distribution's DLLs) and built once with `emcmake`/`emmake` ahead of
+the main configure:
+```
+git clone https://github.com/emscripten-core/emsdk.git third_party/emsdk
+cd third_party/emsdk && ./emsdk install latest && ./emsdk activate latest && source emsdk_env.sh
+git clone --depth 1 https://github.com/fukuchi/libqrencode.git third_party/libqrencode
+emcmake cmake -B third_party/libqrencode/build-wasm third_party/libqrencode -DWITHOUT_PNG=ON -DWITH_TOOLS=OFF -DWITH_TESTS=OFF -DBUILD_SHARED_LIBS=OFF
+cmake --build third_party/libqrencode/build-wasm
+git clone --depth 1 https://github.com/zxing-cpp/zxing-cpp.git third_party/zxing-cpp
+emcmake cmake -B third_party/zxing-cpp/build-wasm third_party/zxing-cpp -DZXING_READERS=ON -DZXING_WRITERS=OFF -DZXING_C_API=OFF -DZXING_EXAMPLES=OFF -DZXING_UNIT_TESTS=OFF -DBUILD_SHARED_LIBS=OFF
+cmake --build third_party/zxing-cpp/build-wasm --target ZXing
+```
+
+**Two real bugs found and fixed while getting the round-trip test to pass** (see
+`web/roundtrip_test.mjs`, a Node-only hardware-free sanity check — same role `LoopbackLink` plays
+for the native tests, two WASM instances standing in for two browser tabs with a fake "currently
+displayed frame" channel instead of `getUserMedia`):
+1. **Every embind-bound function returns a Promise under Asyncify, even purely synchronous ones**
+   like `decodeQrRgba` — not just the ones that actually call `.await()` internally. Missed
+   initially (`text = Module.decodeQrRgba(...)` silently held a Promise object, never a string,
+   so `try_receive` never saw a decode); fixed by awaiting every call to it, both in `web/main.js`
+   and the test harness.
+2. **Asyncify allows only one suspended call in flight per WASM instance.** `Module` spends the
+   whole transfer suspended inside `runSend()`/`runReceive()` awaiting `waitForFrame` — calling
+   `decodeQrRgba` (also Asyncify-wrapped) on that *same* instance from the camera-polling loop
+   collided with it. Fixed by giving decode its own dedicated WASM instance
+   (`DecodeModule` in `web/main.js`) never shared with the one running the session.
+3. **Default Asyncify stack (4KB) was too small** for this call depth (the ARQ loop through
+   `std::function` callbacks, `std::string`/`std::vector`, exceptions) — aborted partway through a
+   transfer with no useful error (`Aborted(undefined)`). Fixed with `-sASYNCIFY_STACK_SIZE=65536`.
+
+**Verified**: `web/roundtrip_test.mjs` passes both scenarios end-to-end — full bidirectional
+handshake/ARQ transfer and full broadcast/simplex transfer, both through the real WASM-compiled
+`qr_encode_bytes` (libqrencode) → rasterize → `decode_qr_rgba` (zxing-cpp) round trip, byte-exact
+output, hash-verified by the receiver. Native build/tests re-run clean after all changes (`make
+clean && make test`, all checks still passing) — nothing existing regressed. **Not yet tested in
+an actual browser** (no headless Chromium/puppeteer available in this dev environment; only native
+Firefox, no browser-automation tooling) — the Node harness proves the whole WASM/Asyncify/protocol
+chain is correct, but real `getUserMedia`/canvas/camera-pointed-at-a-screen behavior remains
+unverified, the same standing gap this project has had for every native platform's camera/screen
+testing throughout.
+
+### Follow-up review pass, requested before committing (same day) — 4 more real bugs found and fixed
+
+Asked to detail remaining bugs and how they'd be fixed before committing, plus a general "check for
+more bugs" pass. Went back through `wasm_link.cpp`/`main.js` deliberately looking for exactly this;
+found and fixed four more real issues, none caught by the round-trip test above (it doesn't exercise
+a real getUserMedia camera loop, exception-triggering payloads, or a second camera device):
+
+1. **A C++ exception thrown anywhere in the call graph permanently aborted the whole WASM
+   instance**, not just the one call — confirmed empirically with a throwaway diagnostic function:
+   a second call into the same module after a caught throw failed identically, proving the
+   instance was left dead. Root cause: Emscripten disables exception unwinding by default. Fixed
+   by compiling and linking with `-fwasm-exceptions` (both `libqrencode`/`zxing-cpp` rebuilt with
+   the same flag for consistency — mixing exception-handling models across statically-linked
+   objects in one wasm binary is asking for trouble). Verified: after the fix, a second call on
+   the same instance following a throw succeeds normally.
+2. **The exception, once no longer fatal, still wasn't usable**: it crosses into JS as an opaque
+   `WebAssembly.Exception` with no `.message` — embind's usual exception-to-`Error` translation
+   doesn't reliably apply under this newer exception-handling mode. Rather than depend on that,
+   `WebSession::run_send`/`run_receive`/`run_broadcast_send`/`run_broadcast_receive` now each wrap
+   their whole body in try/catch and convert any `std::exception` into an ordinary
+   `{success:false, message: e.what()}`-shaped failure result — the same shape `Sender::send_file`
+   already uses for "file not found," just one more flavor of "this attempt didn't work." Verified
+   with a diagnostic reproducing the exact real shape (throw *after* an Asyncify await, caught by
+   an internal try/catch) — message came through correctly, instance stayed healthy for further
+   calls afterward.
+3. **`web/main.js`'s camera-capture loop mixed two WASM instances' memory**: `Module._malloc`/
+   `Module.HEAPU8.set` allocated the pixel buffer, but `DecodeModule.decodeQrRgba(ptr, ...)` read
+   it from a *different* instance's separate linear memory — a pointer from one instance is
+   meaningless in another's address space. Missed initially because `web/roundtrip_test.mjs`'s own
+   `makeSide()` helper (written after this bug was introduced, while fixing the *"only one
+   suspended Asyncify call per instance"* issue below) used the decode instance consistently for
+   both, so the test never exercised the mismatch. Fixed by using `DecodeModule` for the malloc/
+   free/`HEAPU8` calls too, consistently.
+4. **A single decode exception could silently kill the whole camera-polling loop forever.**
+   `tick()`'s `requestAnimationFrame(tick)` reschedule sits at the very end of the function body;
+   an exception escaping the inner `try/finally` uncaught (nothing catches it) would skip past that
+   line, and nothing would ever call `requestAnimationFrame` again — no crash, no visible error,
+   just complete silent stalling for the rest of the page's life. `ZXing::ImageView`'s constructor
+   throwing on a `0`-width/height frame (plausible for a stray tick right as the camera stream
+   starts) is a realistic trigger. Fixed by wrapping the whole `tick()` body in try/catch, logging
+   and continuing rather than letting an occasional bad frame kill the loop.
+
+**Also fixed, a real (non-crashing) usability bug found in the same pass**: selecting a different
+camera from the dropdown after permission had already been granted via the "Richiedi accesso"
+button had no effect — `startCamera()`'s `if (mediaStream) return;` guard exited before ever
+looking at the requested device id. Fixed by tracking the currently-open device id and tearing
+down/restarting the stream when a different one is requested.
+
+**Still open, and why it's deferred rather than "fixed"**: real-browser execution remains
+completely unverified (same limitation as above — no browser automation tooling in this
+environment). This round found and fixed everything a careful code-level review plus a
+protocol-level round-trip test could surface; it cannot substitute for actually pointing a real
+camera at a real screen in a real browser, which is the one thing left that only the user's own
+hardware can verify.
+
+### Optical zoom control, requested for phone cameras with multiple lenses (same day)
+
+Asked to add camera zoom/multi-lens support like other QR scanner apps have, specifically *not*
+relying on digital zoom. `setupZoomControl()` (`web/main.js`) uses the `zoom` MediaTrackConstraint
+(part of the Image Capture / extended Media Capture spec) — a real hardware/optical zoom step,
+not a canvas crop+scale: keeps the camera's full sensor resolution feeding the decoder instead of
+throwing pixels away, and on some phones the OS/browser will switch to a longer physical lens
+automatically past a given zoom threshold. Feature-detected via `track.getCapabilities().zoom`
+(currently only reliably present in Chromium-based browsers, mainly Android Chrome — Firefox/
+Safari don't expose it as of this writing) — the slider is hidden and an explanatory hint shown
+instead when unsupported, rather than silently falling back to a digital zoom that would
+contradict the whole point of asking for this. Re-run for whichever camera is currently active
+(`startCamera()` calls it after each `getUserMedia()`), since different lenses on the same phone
+can have different (or no) zoom ranges. Manual lens selection (e.g. explicitly picking an
+ultra-wide if the phone/browser lists it as a separate device) already works via the existing
+camera dropdown, `enumerateDevices()` — more so now that the camera-switch bug above is fixed.
+
+**Not verified on real hardware** — same standing gap as the rest of the web port; the `zoom`
+capability's actual availability/behavior varies enough by phone and browser version that this
+needs to be tried on the user's own device to know whether it does anything.

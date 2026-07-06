@@ -131,3 +131,104 @@ if(UNIX AND NOT APPLE AND WITH_OPENCV)
                         "(Debian/Ubuntu), or gtk3 (Arch) to enable it.")
     endif()
 endif()
+
+# Browser/WASM target (qrtp_web) -- entirely additive, no existing target above is touched or
+# reconfigured by this. Built with `emcmake cmake -B build-wasm -DWITH_WASM=ON && cmake --build
+# build-wasm --target qrtp_web` (the explicit --target matters: this file's other executables
+# (qrtp/qrtp_tests/qrtp_gui) are still defined under an Emscripten configure too, since none of
+# this is gated behind WITH_WASM -- building the specific target instead of the generator's
+# default `all` avoids ever needing to know whether those happen to also compile under emcc).
+#
+# QRTP_CORE_SOURCES (the same OpenCV-free sources as qrtp_core above -- crc32/sha256/base64/
+# framing/adaptive/link/protocol/broadcast) is genuinely 100% portable C++17 with no platform
+# dependency, so it's reused byte-for-byte here, just listed again for a separate executable
+# target rather than restructuring qrtp_core's own conditional (which would mean editing existing
+# lines). optical_link.cpp/gui_common.cpp are OpenCV/native-window specific and have no place
+# here; qr_encoder.cpp's dlopen has no WASM equivalent, so qr_encoder_wasm.cpp (static-linking
+# libqrencode instead) stands in for it -- see that file's own header comment.
+option(WITH_WASM "Build the browser/WebAssembly target (requires configuring with emcmake)" OFF)
+if(WITH_WASM)
+    if(NOT EMSCRIPTEN)
+        message(FATAL_ERROR "WITH_WASM requires configuring with emcmake, e.g.: "
+                             "emcmake cmake -B build-wasm -DWITH_WASM=ON")
+    endif()
+
+    set(QRTP_WASM_SOURCES
+        src/crc32.cpp
+        src/sha256.cpp
+        src/base64.cpp
+        src/framing.cpp
+        src/adaptive.cpp
+        src/link.cpp
+        src/protocol.cpp
+        src/broadcast.cpp
+        src/qr_encoder_wasm.cpp
+        src/wasm_link.cpp
+    )
+
+    # libqrencode and zxing-cpp are fetched as source and built for WASM under third_party/ (see
+    # PROGRESS.md for the exact emcmake/emcc build steps) -- not committed to the repo, same
+    # treatment as the Windows distribution's DLLs, and not pulled in via add_subdirectory() to
+    # keep their own CMake machinery (tests, examples, unrelated writer/C-API options) out of this
+    # project's own configure.
+    set(QRTP_LIBQRENCODE_DIR "${CMAKE_SOURCE_DIR}/third_party/libqrencode")
+    set(QRTP_ZXINGCPP_DIR "${CMAKE_SOURCE_DIR}/third_party/zxing-cpp")
+    # find_library() isn't used here: the Emscripten toolchain file restricts library search to
+    # CMAKE_FIND_ROOT_PATH (its own sysroot) unconditionally, the same cross-compiling gotcha
+    # already worked around for the MinGW toolchain elsewhere in this project (see
+    # cmake/toolchain-mingw64.cmake) -- so PATHS/NO_DEFAULT_PATH here would just never match
+    # anything under third_party/. These are pre-built artifacts (like the Windows dist's DLLs),
+    # not something the linker needs to search for, so a direct, checked path is simpler anyway.
+    set(QRTP_LIBQRENCODE_LIB "${QRTP_LIBQRENCODE_DIR}/build-wasm/libqrencode.a")
+    set(QRTP_ZXING_LIB "${QRTP_ZXINGCPP_DIR}/build-wasm/core/libZXing.a")
+    if(NOT EXISTS "${QRTP_LIBQRENCODE_LIB}" OR NOT EXISTS "${QRTP_ZXING_LIB}")
+        message(FATAL_ERROR "WITH_WASM: libqrencode/zxing-cpp not built yet under third_party/ "
+                             "(see PROGRESS.md for the build steps)")
+    endif()
+
+    add_executable(qrtp_web ${QRTP_WASM_SOURCES})
+    target_include_directories(qrtp_web PRIVATE
+        include
+        "${QRTP_LIBQRENCODE_DIR}"
+        "${QRTP_ZXINGCPP_DIR}/core/src"
+        "${QRTP_ZXINGCPP_DIR}/build-wasm/core" # generated Version.h
+    )
+    target_compile_features(qrtp_web PRIVATE cxx_std_17)
+    # Emscripten disables C++ exception unwinding by default (-fno-exceptions-like behavior at
+    # the wasm level) -- any throw (e.g. qr_encoder_wasm.cpp's payload-too-large check) calls
+    # abort() instead of unwinding, which doesn't just fail that one call: the whole module
+    # instance is left permanently unusable afterward. -fwasm-exceptions (native WASM exception
+    # handling, well supported by this Emscripten version) must be passed at both compile and
+    # link time, consistently, everywhere something might throw or catch across a call boundary
+    # -- including the pre-built libqrencode/zxing-cpp static libs, so those must be (re)built
+    # with the same flag (see PROGRESS.md for the updated build steps).
+    target_compile_options(qrtp_web PRIVATE -fwasm-exceptions)
+    target_link_libraries(qrtp_web PRIVATE "${QRTP_LIBQRENCODE_LIB}" "${QRTP_ZXING_LIB}")
+    target_link_options(qrtp_web PRIVATE
+        --bind
+        -fwasm-exceptions
+        -sASYNCIFY
+        # Asyncify's default stack (4KB) is too small for this call depth (Sender/Receiver's
+        # ARQ loop through std::function callbacks, std::string/std::vector, exceptions) --
+        # silently aborts partway through a transfer with no useful error message otherwise.
+        -sASYNCIFY_STACK_SIZE=65536
+        -sMODULARIZE=1
+        -sEXPORT_ES6=1
+        -sEXPORT_NAME=createQrtpModule
+        -sALLOW_MEMORY_GROWTH=1
+        # web,node (not just web): the browser app (web/main.js) only ever runs this in a
+        # browser, but the same build also doubles as a Node-loadable module for the
+        # hardware-free round-trip sanity check (see PROGRESS.md) -- same relationship
+        # LoopbackLink already has to real hardware for the native protocol tests.
+        -sENVIRONMENT=web,node
+        -sFORCE_FILESYSTEM=1 # MEMFS: lets run_send() take a plain path, unchanged from Sender::send_file's native signature -- JS writes the picked File's bytes there first (FS.writeFile), no C++-side change needed for file input.
+        # None of these are attached to Module by default any more (tree-shaken unless listed
+        # explicitly): FS (file writes for send()), HEAPU8+_malloc+_free (JS writes captured
+        # camera pixels straight into the WASM heap before calling decodeQrRgba -- see web/main.js
+        # -- rather than paying embind's per-element marshaling cost on a multi-megapixel buffer
+        # every polled frame).
+        -sEXPORTED_RUNTIME_METHODS=FS,HEAPU8
+        -sEXPORTED_FUNCTIONS=_malloc,_free
+    )
+    set_target_properties(qrtp_web PROPERTIES OUTPUT_NAME "qrtp_web" SUFFIX ".js")
+endif()

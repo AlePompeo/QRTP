@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QRTP — Trasferimento file via QR (web)</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>QRTP — trasferimento file via QR (browser)</h1>
+<p class="hint">
+  Stessa logica di trasferimento del progetto nativo (protocollo ARQ/AIMD invariato, vedi
+  <code>src/wasm_link.cpp</code>) eseguita qui via WebAssembly — camera e schermo sostituiscono
+  webcam UVC e finestra nativa.
+</p>
+
+<fieldset>
+  <legend>Ruolo e modalità</legend>
+  <label><input type="radio" name="role" value="send" checked> Invia</label>
+  <label><input type="radio" name="role" value="receive"> Ricevi</label>
+  <span class="sep"></span>
+  <label><input type="radio" name="mode" value="bidir" checked> Bidirezionale</label>
+  <label><input type="radio" name="mode" value="broadcast"> Unidirezionale (broadcast)</label>
+</fieldset>
+
+<fieldset id="fileSection">
+  <legend>File</legend>
+  <input type="file" id="fileInput">
+  <span class="hint">Solo per "Invia" — per "Ricevi" il file scaricato appare a fine trasferimento.</span>
+</fieldset>
+
+<fieldset>
+  <legend>Fotocamera</legend>
+  <select id="camSelect"><option value="">(permesso non ancora concesso)</option></select>
+  <button type="button" id="camPermBtn">Richiedi accesso camera</button>
+  <div id="zoomControl" class="hidden">
+    <label>Zoom ottico
+      <input type="range" id="zoomSlider">
+      <span id="zoomValue"></span>
+    </label>
+  </div>
+  <span id="zoomUnsupportedHint" class="hint hidden">
+    Zoom ottico non supportato da questo browser/dispositivo — se il telefono ha più obiettivi
+    (grandangolo/tele), prova a selezionarli direttamente dall'elenco camere sopra.
+  </span>
+  <video id="camVideo" autoplay playsinline muted></video>
+</fieldset>
+
+<fieldset id="bidirSection">
+  <legend>Parametri bidirezionale</legend>
+  <label>FPS iniziale <input type="number" id="fpsInput" value="10" min="1" max="60"></label>
+  <label>Chunk max <input type="number" id="chunkMaxInput" value="180" min="32" max="1024"></label>
+  <label>Livello EC
+    <select id="ecLevelSelect">
+      <option value="0">L</option>
+      <option value="1" selected>M</option>
+      <option value="2">Q</option>
+      <option value="3">H</option>
+    </select>
+  </label>
+</fieldset>
+
+<fieldset id="broadcastSection">
+  <legend>Parametri unidirezionale (broadcast)</legend>
+  <label>FPS fisso <input type="number" id="broadcastFpsInput" value="3" disabled></label>
+  <label>Chunk <input type="number" id="broadcastChunkInput" value="180" min="32" max="1024"></label>
+  <label>Loop (0 = infinito) <input type="number" id="loopsInput" value="0" min="0"></label>
+</fieldset>
+
+<div class="controls">
+  <button type="button" id="startBtn">Avvia</button>
+  <button type="button" id="stopBtn" disabled>Ferma</button>
+  <span id="statusLabel">Pronto.</span>
+</div>
+
+<div id="downloadArea" class="hidden">
+  File ricevuto: <a id="downloadLink" download>scarica</a>
+</div>
+
+<div class="canvases">
+  <canvas id="qrCanvas" width="480" height="480"></canvas>
+  <canvas id="captureCanvas" class="hidden"></canvas>
+</div>
+
+<fieldset>
+  <legend>Log</legend>
+  <textarea id="logArea" readonly></textarea>
+</fieldset>
+
+<script type="module" src="main.js"></script>
+</body>
+</html>

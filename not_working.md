@@ -1712,6 +1712,24 @@ to the Makefile.
   effort tuning (see the 2026-07-05/06 camera-settings entries throughout this log and
   PROGRESS.md), so a web port would likely need to re-litigate several of those same reliability
   questions in a more constrained API.
+  **Update 2026-07-06 (same day): built.** Went with `zxing-cpp` instead (pure algorithm, no
+  DNN/Caffe dependency, much simpler to get building under Emscripten than an OpenCV.js path
+  would have been) — see PROGRESS.md's "Web/browser port" entry for the full design
+  (`src/wasm_link.cpp`, `src/qr_encoder_wasm.cpp`, `web/`). The `getUserMedia`-vs-`VideoCapture`
+  gap flagged above is real and still unresolved: nothing in this session touched real camera
+  control knobs in the browser at all yet (see the untested-in-a-real-browser note just below).
+- **Web port (`web/`, `src/wasm_link.cpp`) not yet tested in an actual browser.** No headless
+  Chromium/puppeteer/playwright available in this dev environment (only native Firefox, no
+  automation tooling) — verified instead with `web/roundtrip_test.mjs`, a Node-only harness that
+  proves the WASM/Asyncify/protocol chain itself is correct (real `qr_encode_bytes`-via-libqrencode
+  → rasterize → `decode_qr_rgba`-via-zxing-cpp round trip, byte-exact, hash-verified), but never
+  exercises real `getUserMedia`/canvas/camera-pointed-at-a-screen behavior. Same standing gap this
+  project has had for every native platform (no camera/screen hardware in this environment either)
+  — just one layer further from proven, since the web target adds Asyncify suspension and a
+  browser's camera API on top. Whenever real browser testing does happen, watch particularly for:
+  whether `requestAnimationFrame`-rate decode polling actually keeps up with `getUserMedia`'s real
+  frame delivery cadence, and whether Asyncify's suspend/resume behaves identically across engines
+  (only ever exercised here under V8/Node — Firefox/Safari use different WASM engines entirely).
 
 ## Anticipated failure modes to validate once the real optical link is tested against hardware
 
