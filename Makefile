@@ -20,6 +20,13 @@ ifeq ($(WITH_OPENCV),1)
 CORE_SRCS += optical_link.cpp gui_common.cpp
 CXXFLAGS_EXTRA += -DQRTP_WITH_OPENCV $(shell pkg-config --cflags opencv4)
 LDLIBS_EXTRA += $(shell pkg-config --libs opencv4)
+# opencv_contrib's wechat_qrcode module is confirmed present in Fedora's stock opencv4 pkg-config
+# output, but genuinely absent from Debian 12's/Ubuntu 22.04-24.04's -- not universally packaged
+# across distros (see optical_link.hpp's OpticalLinkConfig::use_wechat_qrcode comment). Detected
+# via whether pkg-config actually links it in, same signal CMakeLists.txt checks via the header.
+ifneq ($(shell pkg-config --libs opencv4 2>/dev/null | grep -o wechat_qrcode),)
+CXXFLAGS_EXTRA += -DQRTP_HAVE_WECHAT_QRCODE
+endif
 endif
 
 DEPFLAGS := -MMD -MP

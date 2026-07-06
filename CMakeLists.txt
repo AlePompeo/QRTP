@@ -48,11 +48,30 @@ if(WITH_OPENCV)
     list(APPEND QRTP_CORE_SOURCES src/optical_link.cpp src/gui_common.cpp)
 endif()
 
+# opencv_contrib's wechat_qrcode module (a real CNN-based QR detector, see optical_link.hpp) is
+# confirmed present in Fedora's stock opencv-devel package, but genuinely *absent* from Debian
+# 12's and Ubuntu 22.04/24.04's stock libopencv-dev -- not universally packaged across distros.
+# Checked via the header's presence rather than assuming any one distro's behavior generalizes.
+set(QRTP_HAVE_WECHAT_QRCODE FALSE)
+if(WITH_OPENCV)
+    find_file(QRTP_WECHAT_QRCODE_HEADER "opencv2/wechat_qrcode.hpp" PATHS ${OpenCV_INCLUDE_DIRS} NO_DEFAULT_PATH)
+    if(QRTP_WECHAT_QRCODE_HEADER)
+        set(QRTP_HAVE_WECHAT_QRCODE TRUE)
+        message(STATUS "opencv2/wechat_qrcode.hpp found -- WeChatQRCode decoder available")
+    else()
+        message(STATUS "opencv2/wechat_qrcode.hpp not found -- WeChatQRCode decoder unavailable, "
+                        "classic cv::QRCodeDetector only (see OpticalLinkConfig::use_wechat_qrcode)")
+    endif()
+endif()
+
 add_library(qrtp_core STATIC ${QRTP_CORE_SOURCES})
 target_include_directories(qrtp_core PUBLIC include)
 
 if(WITH_OPENCV)
     target_compile_definitions(qrtp_core PUBLIC QRTP_WITH_OPENCV)
+    if(QRTP_HAVE_WECHAT_QRCODE)
+        target_compile_definitions(qrtp_core PUBLIC QRTP_HAVE_WECHAT_QRCODE)
+    endif()
     target_include_directories(qrtp_core PUBLIC ${OpenCV_INCLUDE_DIRS})
     target_link_libraries(qrtp_core PUBLIC ${OpenCV_LIBS})
 endif()

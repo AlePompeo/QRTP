@@ -3,7 +3,9 @@
 
 #include <opencv2/objdetect.hpp>
 #include <opencv2/opencv.hpp>
+#ifdef QRTP_HAVE_WECHAT_QRCODE
 #include <opencv2/wechat_qrcode.hpp>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -26,9 +28,11 @@ namespace qrtp {
 namespace {
 cv::VideoCapture* cap(void* p) { return reinterpret_cast<cv::VideoCapture*>(p); }
 cv::QRCodeDetector* det(void* p) { return reinterpret_cast<cv::QRCodeDetector*>(p); }
+#ifdef QRTP_HAVE_WECHAT_QRCODE
 cv::wechat_qrcode::WeChatQRCode* wechat_det(void* p) {
     return reinterpret_cast<cv::wechat_qrcode::WeChatQRCode*>(p);
 }
+#endif
 cv::Mat* screen_canvas(void* p) { return reinterpret_cast<cv::Mat*>(p); }
 
 // Resolves OpticalLinkConfig::wechat_qrcode_model_dir when left empty: a "models/wechat_qrcode"
@@ -238,6 +242,7 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
     // decode, so a missing/misplaced model file fails loudly at startup (matching how a missing
     // camera index fails below) instead of surfacing as a confusing per-frame decode failure deep
     // into a transfer.
+#ifdef QRTP_HAVE_WECHAT_QRCODE
     if (cfg_.use_wechat_qrcode) {
         const std::string model_dir =
             cfg_.wechat_qrcode_model_dir.empty() ? default_wechat_model_dir() : cfg_.wechat_qrcode_model_dir;
@@ -256,6 +261,19 @@ OpticalLink::OpticalLink(OpticalLinkConfig cfg)
                 "\" (expects detect.prototxt, detect.caffemodel, sr.prototxt, sr.caffemodel there): " + e.what());
         }
     }
+#else
+    // This build's OpenCV doesn't have opencv_contrib's wechat_qrcode module at all (see
+    // OpticalLinkConfig::use_wechat_qrcode's comment) — its default already reflects that, so this
+    // only fires if a caller explicitly forces it on anyway. Fails loudly here rather than
+    // silently falling back, for the same "don't surface a mismatched config as a confusing
+    // per-frame failure" reason as the branch above.
+    if (cfg_.use_wechat_qrcode) {
+        throw std::runtime_error(
+            "OpticalLink: this build was compiled without WeChatQRCode support (opencv_contrib's "
+            "wechat_qrcode module wasn't available in this OpenCV install) — set "
+            "use_wechat_qrcode = false to use the classic cv::QRCodeDetector instead");
+    }
+#endif
 
     if (!cap(capture_)->isOpened()) {
         throw std::runtime_error("OpticalLink: cannot open camera index " + std::to_string(cfg_.camera_index));
@@ -371,7 +389,9 @@ OpticalLink::~OpticalLink() {
     delete capture_thread(capture_thread_); // stops + joins the background thread first
     delete cap(capture_);
     delete det(detector_);
+#ifdef QRTP_HAVE_WECHAT_QRCODE
     delete wechat_det(wechat_detector_);
+#endif
     delete screen_canvas(out_canvas_);
     cv::destroyWindow(out_window_name_);
     cv::destroyWindow(camera_window_name_);
@@ -496,6 +516,7 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
             const auto t_decode_start = Clock::now();
             const cv::Mat decode_input = downscale_for_decode(gray);
             std::string decoded_text;
+#ifdef QRTP_HAVE_WECHAT_QRCODE
             if (cfg_.use_wechat_qrcode) {
                 // Can return more than one decoded string even here (its detector doesn't assume a
                 // single QR) — the classic path's own invariant is "one QR on screen at a time," so
@@ -505,6 +526,9 @@ bool OpticalLink::try_receive(std::vector<uint8_t>& out, std::chrono::millisecon
             } else {
                 decoded_text = det(detector_)->detectAndDecode(decode_input);
             }
+#else
+            decoded_text = det(detector_)->detectAndDecode(decode_input);
+#endif
             decode_ms_accum_ += std::chrono::duration<double, std::milli>(Clock::now() - t_decode_start).count();
             ++poll_count_since_last_decode_;
             if (!decoded_text.empty()) {
@@ -690,6 +714,7 @@ bool OpticalLink::try_receive_multi(std::vector<uint8_t>& out, std::chrono::mill
             const auto t_decode_start = Clock::now();
             const cv::Mat decode_input = downscale_for_decode(gray);
             std::vector<std::string> decoded_texts;
+#ifdef QRTP_HAVE_WECHAT_QRCODE
             if (cfg_.use_wechat_qrcode) {
                 // Its detectAndDecode() already returns every code found in one call — no separate
                 // "multi" entry point needed, unlike the classic detector.
@@ -697,6 +722,9 @@ bool OpticalLink::try_receive_multi(std::vector<uint8_t>& out, std::chrono::mill
             } else {
                 det(detector_)->detectAndDecodeMulti(decode_input, decoded_texts);
             }
+#else
+            det(detector_)->detectAndDecodeMulti(decode_input, decoded_texts);
+#endif
             decode_ms_accum_ += std::chrono::duration<double, std::milli>(Clock::now() - t_decode_start).count();
             ++poll_count_since_last_decode_;
 

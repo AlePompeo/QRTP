@@ -4,4 +4,6 @@
 /dist-windows/
 /dist-windows.zip
 /dist-linux/
+/dist-linux-*/
 /qrtp-linux-x86_64.tar.gz
+/qrtp-linux-x86_64-*.tar.gz

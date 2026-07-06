@@ -852,3 +852,77 @@ AppImage path later if a truly zero-prerequisite single-file distributable is wa
 (not from the dev `bin/` tree) — `qrtp_tests` all passing, `qrtp send --camera 0` failing cleanly
 with no camera present (same real V4L2 open-path exercised as the native build entry above), and
 `qrtp_gui` launched under the real `DISPLAY` available in this environment without errors.
+
+## Per-distribution Linux packages + made WeChatQRCode compile-time optional (2026-07-06, same day)
+
+User asked whether the Windows/Linux builds had actually been checked for backward/cross-version
+compatibility — they hadn't, beyond this one Fedora 43 machine. Checking turned up a real, now-
+confirmed reason the single generic tarball above can't be "one binary, every distro": `objdump -T`
+on `qrtp_gui` showed it requires up to `GLIBC_2.38` (too new for Ubuntu 22.04's 2.35, Debian 12's
+2.36 — both would refuse to even start it), and `ldd` showed OpenCV linked via an exact-version
+SONAME (`libopencv_core.so.411`) that only Fedora 43 itself actually provides — any other distro's
+own `opencv` package resolves to a *different* SONAME the binary can't use, `.pc`-file "install
+opencv from your package manager" advice notwithstanding. Decided (after freeing disk space to make
+room — see below) to build natively per major distribution instead of chasing one universal
+binary, using `podman` (rootless, no daemon needed) to run each target distro's own official
+container image and compile inside it — same idea as `cmake/toolchain-mingw64.cmake` cross-
+compiling for Windows, just via a container instead of a cross-toolchain.
+
+**Housekeeping first**: freed ~2.2GB of disk headroom before attempting any build (user confirmed
+each item individually) — emptied `~/.local/share/Trash` (1.3GB), several user-level app caches
+(~/.cache/libdnf5, mozilla, gnome-software, tracker3, vscode-cpptools, pip), and an old project
+download no longer needed. Also identified (but explicitly did *not* touch, since it's actively-
+used software, not scratch) `/var/lib/flatpak`'s 2.7GB — confirmed via `flatpak list` to be Chrome
+and Telegram plus their runtimes, not disposable.
+
+**Real, build-breaking finding while checking the target distros**: `find`/`dpkg -L` initially
+suggested Ubuntu 22.04/24.04 and Debian 12 lack opencv_contrib's `wechat_qrcode` module entirely
+(unlike Fedora) — `optical_link.cpp`'s unconditional `#include <opencv2/wechat_qrcode.hpp>` would
+have been a hard compile error there. Fixed properly rather than working around it: added
+`QRTP_HAVE_WECHAT_QRCODE`, detected in `CMakeLists.txt` (via `find_file` for the header in
+`OpenCV_INCLUDE_DIRS`) and in the `Makefile` (via `pkg-config --libs opencv4 | grep wechat_qrcode`),
+gating every `wechat_qrcode`-touching line in `optical_link.hpp`/`.cpp` behind `#ifdef`.
+`OpticalLinkConfig::use_wechat_qrcode`'s default now follows the macro (`true` only when actually
+available); forcing it `true` on a build without support throws a clear error at `OpticalLink`
+construction instead of failing to compile or silently no-op'ing. **Plot twist**: once actually
+building inside the containers, all three distros' `pkg-config`/compiler confirmed
+`wechat_qrcode` *is* genuinely available and linkable there too — the earlier `dpkg -L` check was
+wrong (checked the wrong signal). The conditional-compile fix stays anyway: it's real, low-risk
+portability hardening for distros/versions that genuinely do lack it (older releases, minimal
+installs), verified correct in both directions (compiles and behaves identically on Fedora with
+the macro defined; the `#else` paths compile and would throw/fall-back correctly if ever hit) —
+just not the specific blocker it first looked like on these four.
+
+**Per-distro build process**: for each target (`ubuntu:22.04`, `ubuntu:24.04`, `debian:12`;
+Fedora already covered by the native host build), `podman run` with the repo bind-mounted
+*read-only* (never risking the live working tree) plus a separate writable output mount, running a
+small script that installs `build-essential`/`libopencv-dev`/`libgtk-3-dev`/`libqrencode-dev`,
+copies the read-only source to a writable path, then `make clean && make WITH_OPENCV=1 && make
+test WITH_OPENCV=1 && make bin/qrtp_gui WITH_OPENCV=1`, `strip`s the three binaries, and copies
+them out. Real, if minor, first-attempt mistakes along the way, both now fixed: an inline
+multi-line `bash -c "..."` command got its newlines collapsed somewhere in tool-call handling,
+silently turning `apt-get install -y ...` into one long malformed command line that hung
+indefinitely waiting on stdin (worked around by writing the build steps as a mounted script file
+instead of an inline string); and the first attempts didn't install `libqrencode`, so the freshly-
+built `qrtp_tests` crashed immediately with a clear, correctly-reported "cannot load libqrencode"
+error — not a real portability issue, just an incomplete container setup, fixed by adding
+`libqrencode-dev` to the install step.
+
+**Shipped**: four packages instead of one —
+`qrtp-linux-x86_64-{fedora,ubuntu2204,ubuntu2404,debian12}.tar.gz` — each built and tested inside
+that distro's own environment, so each one's OpenCV/GTK3/glibc dependencies genuinely match what
+that distribution's own package manager provides (no more exact-SONAME/glibc-version mismatch).
+Superseded the single generic `dist-linux/`/`qrtp-linux-x86_64.tar.gz` from the entry above.
+
+**Verified**: `make test` passed *inside* all four build environments (native Fedora + the three
+containers) — genuine functional confirmation per target, not just "compiles by inspection." The
+Fedora package was additionally extracted to a clean directory and run standalone outside any
+build tree (`qrtp_tests` passing, `qrtp_gui` launching under the real `DISPLAY` available here) —
+the other three can't be run at all on this Fedora host (that's the whole point: different
+glibc/OpenCV SONAMEs), so their verification is the in-container `make test` pass plus the
+successful `qrtp_gui` link. **Still not tested on real camera/screen hardware on any of the four**
+— same standing limitation as every other platform this project targets. **Windows compatibility
+remains unverified beyond the MinGW toolchain's default PE subsystem version (5.2, a
+cross-compile-toolchain default, not a deliberate or tested minimum)** and one historical
+crash-then-fixed real-hardware attempt on an unrecorded Windows version — genuinely confirming
+Windows backward-compatibility would need real hardware this dev environment doesn't have.

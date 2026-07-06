@@ -113,7 +113,18 @@ struct OpticalLinkConfig {
     // remaining bottleneck — a stronger detector attacks that directly, even though each attempt
     // likely costs somewhat more CPU than the classical approach. Still not verified end-to-end on
     // real camera hardware as of this default flip.
+    //
+    // Default depends on whether this build's OpenCV actually has the module at all: confirmed
+    // present in Fedora's stock opencv-devel package, but genuinely *absent* from Debian 12's and
+    // Ubuntu 22.04/24.04's stock libopencv-dev (opencv_contrib's wechat_qrcode isn't universally
+    // packaged) — see CMakeLists.txt/Makefile's QRTP_HAVE_WECHAT_QRCODE detection and
+    // optical_link.cpp. Setting this true on a build without it throws at OpticalLink construction
+    // rather than silently falling back, so a mismatched config is never a silent surprise.
+#ifdef QRTP_HAVE_WECHAT_QRCODE
     bool use_wechat_qrcode = true;
+#else
+    bool use_wechat_qrcode = false;
+#endif
     // Directory containing detect.prototxt, detect.caffemodel, sr.prototxt, sr.caffemodel (from
     // github.com/WeChatCV/opencv_3rdparty, branch wechat_qrcode — the canonical source
     // opencv_contrib's own wechat_qrcode module points at). Empty (default) resolves to a
