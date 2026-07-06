@@ -215,7 +215,16 @@ if(WITH_WASM)
         -sMODULARIZE=1
         -sEXPORT_ES6=1
         -sEXPORT_NAME=createQrtpModule
-        -sALLOW_MEMORY_GROWTH=1
+        # NOT -sALLOW_MEMORY_GROWTH=1 (deliberately): confirmed on real hardware (Chrome) that a
+        # growable WebAssembly.Memory gets backed by a *resizable* ArrayBuffer, and TextDecoder
+        # (which embind's std::string-return marshaling uses internally, e.g. decodeQrRgba's
+        # result) throws "The provided ArrayBuffer value must not be resizable" on any view into
+        # one -- this doesn't happen with a fixed-size (non-growable) memory, which plain
+        # ArrayBuffers still back everywhere. Traded for a fixed, generous ceiling instead: QR-code
+        # file transfer is inherently slow/small-file-oriented by nature of the medium, so 128MB
+        # is far beyond what a real transfer needs (file bytes + camera frame buffers + protocol
+        # state), while completely sidestepping this whole class of bug.
+        -sINITIAL_MEMORY=134217728
         # web,node (not just web): the browser app (web/main.js) only ever runs this in a
         # browser, but the same build also doubles as a Node-loadable module for the
         # hardware-free round-trip sanity check (see PROGRESS.md) -- same relationship

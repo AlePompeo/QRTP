@@ -1152,3 +1152,37 @@ deliberately binary-only (`index.html`/`main.js`/`style.css`/`qrtp_web.js`/`qrtp
 usage `README.txt`), same convention as the Windows/Linux distributables: no C++ source, no
 `third_party/` build toolchain, no dev-only `roundtrip_test.mjs` in the shipped asset — those stay
 in the git repo only.
+
+### First real-browser bug report — resizable ArrayBuffer vs. TextDecoder (same day)
+
+The very first real-hardware feedback this web port has ever gotten (Chrome on the user's own
+phone, receive side): `Failed to execute 'decode' on 'TextDecoder': The provided ArrayBuffer value
+must not be resizable`, repeated once per polled frame. This is the exact gap flagged as
+unverified throughout this whole feature (Node's V8 never exhibited it, only a real browser did)
+— a genuinely useful confirmation that the "not yet tested in an actual browser" caveat wasn't
+just caution for its own sake.
+
+**Root cause**: `-sALLOW_MEMORY_GROWTH=1` makes Emscripten construct a *growable*
+`WebAssembly.Memory`, which recent Chrome backs with a genuinely resizable `ArrayBuffer`
+(`buffer.resizable === true`, confirmed directly via a small diagnostic). Any embind function
+returning `std::string` — `decodeQrRgba()` on every single polled camera frame — needs Emscripten's
+internal `UTF8ToString`-style helper to convert the C string to a JS string, which calls
+`TextDecoder.decode()` on a view into that buffer. `TextDecoder` explicitly refuses a resizable
+`ArrayBuffer` (spec-mandated, not a bug in the browser) — so every decode attempt failed, over and
+over, forever, on the receive side specifically (the only place a `std::string` return crosses the
+embind boundary from a hot polling loop).
+
+**Fixed**: dropped `-sALLOW_MEMORY_GROWTH=1` in favor of a fixed `-sINITIAL_MEMORY=134217728`
+(128MB, generous for what this app actually needs — a QR-code file transfer is inherently a
+small/modest-file medium by nature, not something people push gigabytes through). A non-growable
+`WebAssembly.Memory` is backed by a plain, non-resizable `ArrayBuffer` everywhere — confirmed
+directly (`buffer.resizable === false`, `byteLength === maxByteLength` after the fix). Trade-off:
+file transfers are now capped by this fixed ceiling instead of growing arbitrarily, judged an
+acceptable, deliberate trade given the medium.
+
+**Verified**: `web/roundtrip_test.mjs` still passes both scenarios after the fix; native
+`make clean && make test` still clean. Rebuilt and re-uploaded `qrtp-web.zip` to the same release
+(still v56 — a binary refresh, not a new feature, so no version bump). **Still not personally
+confirmed by the user on their phone after this specific fix** — the original report is what
+surfaced it, but this exact rebuild hasn't yet been tried against the same real hardware that
+found it.
