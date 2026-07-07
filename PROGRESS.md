@@ -1528,3 +1528,71 @@ Committed (`517198b`) and pushed to `main`, then republished as release v58 (tag
 All four Linux rebuilds' own test suites passed inside their respective containers/native
 environment before packaging. `web/roundtrip_test.mjs`'s 4 scenarios (2 classic + 2 experimental
 color-multiplex) re-run clean against the rebuilt WASM module.
+
+## JAB Code — second EXPERIMENTAL barcode symbology for the web app, opt-in, additive (same day)
+
+The RGB color-multiplex QR (previous entry) was validated on real hardware and works well.
+Asked to look into further ways of raising per-frame data capacity, specifically for the
+unidirectional/broadcast mode; picked **JAB Code** (`github.com/jabcode/jabcode`, Fraunhofer SIT)
+out of the candidates from that research (JAB Code, HCC2D, Microsoft's old HCCB, COBRA/RDCode
+screen-camera-streaming research) as the concrete next experiment — implemented as a **second,
+independent opt-in**, explicitly required to leave the existing classic-QR and RGB-color-multiplex
+paths completely untouched (web app only, same scope boundary as the color-multiplex feature —
+native GUIs/CLI are not involved).
+
+**Why this is a different kind of feature from the color-multiplex QR**: the color-multiplex mode
+is 3 independent *monochrome* QR codes overlaid one per color channel — it reuses
+libqrencode/zxing-cpp entirely, zero new symbology code. JAB Code is a genuinely different barcode
+symbology: each module is directly one of up to 256 colors (not black/white), encoding log2(N)
+bits/module with its own LDPC error correction (not Reed-Solomon) — no relationship to QR at all,
+requires its own encode/decode library.
+
+**API verified by reading the actual library source** (`jabwriter.c`/`jabreader.c`, the real call
+sites, not just the header): `createEncode(color_number, symbol_number)` → `generateJABCode(enc,
+data)` fills `enc->bitmap` → `decodeJABCode(bitmap, mode, &status)` returns a `jab_data*` or NULL.
+Two properties turned out to make this an unusually clean fit for this project's existing web
+architecture:
+- `jab_bitmap`'s pixel layout (32bpp, RGBA, 4 channels) is bit-for-bit identical to the canvas
+  `ImageData` format already used everywhere in `web/main.js` — encoding hands JS a ready RGBA
+  buffer to `putImageData` directly, and decoding builds a `jab_bitmap` from the captured camera
+  frame with one `memcpy`, no pixel format conversion in either direction.
+  - `jab_data` (`{ int32 length; char data[]; }`) is raw bytes with a length, no text/NUL
+  assumption anywhere in the library — unlike the QR paths here, which base64-encode frame bytes
+  because zxing-cpp/JS strings aren't safe with embedded NULs (see `wasm_link.cpp`'s file header),
+  JAB Code skips base64 entirely, saving its ~33% overhead on top of the color capacity gain.
+
+**A real bug found and fixed during implementation, worth recording**: `generateJABCode` does
+*not* follow this library's own `JAB_SUCCESS`(1)/`JAB_FAILURE`(0) convention used elsewhere (e.g.
+`saveImage`) — verified by reading `encoder.c`'s actual `generateJABCode` body, not assumed from
+the header comment: it returns **0 on success** and a specific non-zero error code per failure
+path. The first implementation had this backwards (`if (!status) throw`), which made every encode
+attempt fail immediately — caught by the very test written for this feature, fixed by checking
+`status != 0` instead. A reminder that for a third-party C library, the header declaration alone
+doesn't tell you the success convention — only reading the real implementation (or, as here,
+finding it the hard way via a failing test) does.
+
+**Verified**: `third_party/jabcode` fetched as source (MIT-relicensed — confirmed by reading the
+actual `LICENSE` file, not assumed from secondary sources, which disagreed on LGPLv2.1 vs LGPLv3),
+built for WASM by compiling the 10 needed `.c` files directly with `emcc` (excluding `image.c`,
+whose only functions — `saveImage`/`readImage`, PNG/TIFF file I/O — are never called by the
+in-memory encode/decode path used here, avoiding the need to also port libpng/libtiff/zlib to
+Emscripten):
+```
+cd third_party/jabcode/src/jabcode && mkdir -p build-wasm && cd build-wasm
+for f in encoder decoder detector binarizer interleave ldpc mask pseudo_random transform sample; do
+  emcc -c -O2 -std=c11 -fwasm-exceptions -I.. -I../include "../$f.c" -o "$f.o"
+done
+emar cru libjabcode.a *.o
+```
+(`-fwasm-exceptions` for consistency with the other statically-linked libraries in this target,
+even though jabcode's C code never throws — see CMakeLists.txt's own comment on why this must
+match across everything linked into `qrtp_web`.) `jabcode.h` needed wrapping in `extern "C" { ...
+}` in `wasm_link.cpp` (it has no `__cplusplus` guard of its own) to avoid a name-mangling
+link failure against the plain-C static library. `web/roundtrip_test.mjs` extended with
+`makeSideJab()`/`runScenarioJab()` (no rasterizer needed, unlike the QR paths — JAB Code's own
+library already produces a ready RGBA bitmap) and two new scenarios (bidirectional + broadcast);
+all 6 scenarios (2 classic + 2 color-multiplex + 2 JAB Code) pass. **Not tested in an actual
+browser or with a real camera** — same standing gap as the rest of the web port, and a bigger
+unknown here than for the color-multiplex mode: an 8-color palette per module is a materially
+harder real-world camera discrimination problem than either black/white QR or 3-channel
+saturated-or-not color detection, genuinely unverified until tried on real hardware.

@@ -266,35 +266,147 @@ async function runScenario(label, payload, sendFn, receiveFn) {
   sessionB.delete();
 }
 
+// EXPERIMENTAL JAB Code counterpart to makeSide()/makeSideColor(): unlike the QR paths, the JAB
+// Code library rasterizes a ready RGBA bitmap itself (see src/wasm_link.cpp's send_jabcode()), so
+// there's no rasterizeQr-equivalent needed here -- the fake "currently displayed frame" channel
+// just carries {width, height, data} directly. Decoded frames are raw bytes, not text, so de-dup
+// compares byte arrays instead of strings.
+function bytesEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function makeSideJab(decodeMod, who, channel) {
+  const other = who === "A" ? "B" : "A";
+  let lastSeen = null;
+  let lastReturned = null;
+  let pendingWaiter = null;
+
+  function offerDecoded(bytes) {
+    lastSeen = bytes;
+    if (bytes.length && !bytesEqual(bytes, lastReturned) && pendingWaiter) {
+      clearTimeout(pendingWaiter.timer);
+      lastReturned = bytes;
+      const resolve = pendingWaiter.resolve;
+      pendingWaiter = null;
+      resolve(bytes);
+    }
+  }
+
+  const poll = setInterval(async () => {
+    const frame = channel[other];
+    if (!frame) return;
+    const ptr = decodeMod._malloc(frame.data.length);
+    decodeMod.HEAPU8.set(frame.data, ptr);
+    try {
+      const bytes = await decodeMod.decodeJabcodeRgba(ptr, frame.width, frame.height);
+      if (bytes && bytes.length) offerDecoded(bytes);
+    } finally {
+      decodeMod._free(ptr);
+    }
+  }, 5);
+  poll.unref();
+
+  const bridge = {
+    renderJabCode(width, height, pixelsRgba) { channel[who] = { width, height, data: pixelsRgba }; },
+    waitForFrameJabCode(timeoutMs) {
+      return new Promise((resolve) => {
+        if (lastSeen && lastSeen.length && !bytesEqual(lastSeen, lastReturned)) {
+          lastReturned = lastSeen;
+          resolve(lastSeen);
+          return;
+        }
+        const timer = setTimeout(() => { pendingWaiter = null; resolve(new Uint8Array(0)); }, timeoutMs);
+        pendingWaiter = { resolve, timer };
+      });
+    },
+    sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); },
+    setFps() {},
+    setEcLevel() {},
+    onLog(msg) { console.log(`[${who}] ${msg}`); },
+  };
+  return { bridge, stop: () => clearInterval(poll) };
+}
+
+async function runScenarioJab(label, payload, sendFn, receiveFn) {
+  console.log(`\n--- ${label} ---`);
+  const [ModA, ModB, DecodeA, DecodeB] = await Promise.all([
+    createQrtpModule(), createQrtpModule(), createQrtpModule(), createQrtpModule(),
+  ]);
+  const channel = { A: null, B: null };
+  const a = makeSideJab(DecodeA, "A", channel);
+  const b = makeSideJab(DecodeB, "B", channel);
+  ModA.qrtpBridge = a.bridge;
+  ModB.qrtpBridge = b.bridge;
+
+  ModA.FS.writeFile("/input_file", new Uint8Array(payload));
+
+  const sessionA = new ModA.WebSession();
+  const sessionB = new ModB.WebSession();
+
+  const [sendResult, receiveResult] = await Promise.all([sendFn(sessionA), receiveFn(sessionB)]);
+
+  console.log("send result:", sendResult);
+  console.log("receive success:", receiveResult.success, receiveResult.filename);
+
+  assert.ok(sendResult.success, "send failed: " + sendResult.message);
+  assert.ok(receiveResult.success, "receive failed");
+  const received = Buffer.from(receiveResult.data);
+  assert.ok(received.equals(payload), "received bytes do not match sent bytes");
+  assert.strictEqual(receiveResult.filename, "input_file");
+
+  console.log(`${label}: OK, ${received.length} bytes matched`);
+
+  a.stop();
+  b.stop();
+  sessionA.delete();
+  sessionB.delete();
+}
+
 async function main() {
   const payload = Buffer.from("QRTP web round-trip test payload. ".repeat(80));
 
   await runScenario(
     "bidirectional",
     payload,
-    (s) => s.runSend("/input_file", 10, 180, 1, false),
-    (s) => s.runReceive(10, 1, false)
+    (s) => s.runSend("/input_file", 10, 180, 1, false, false),
+    (s) => s.runReceive(10, 1, false, false)
   );
 
   await runScenario(
     "broadcast (unidirectional)",
     payload,
-    (s) => s.runBroadcastSend("/input_file", 5.0, 180, 2, 5, false), // loops=5: no ARQ, reliability via repetition
-    (s) => s.runBroadcastReceive(5.0, 1, false)
+    (s) => s.runBroadcastSend("/input_file", 5.0, 180, 2, 5, false, false), // loops=5: no ARQ, reliability via repetition
+    (s) => s.runBroadcastReceive(5.0, 1, false, false)
   );
 
   await runScenarioColor(
     "bidirectional (EXPERIMENTAL color-multiplex)",
     payload,
-    (s) => s.runSend("/input_file", 10, 180, 1, true),
-    (s) => s.runReceive(10, 1, true)
+    (s) => s.runSend("/input_file", 10, 180, 1, true, false),
+    (s) => s.runReceive(10, 1, true, false)
   );
 
   await runScenarioColor(
     "broadcast (EXPERIMENTAL color-multiplex)",
     payload,
-    (s) => s.runBroadcastSend("/input_file", 5.0, 180, 2, 5, true),
-    (s) => s.runBroadcastReceive(5.0, 1, true)
+    (s) => s.runBroadcastSend("/input_file", 5.0, 180, 2, 5, true, false),
+    (s) => s.runBroadcastReceive(5.0, 1, true, false)
+  );
+
+  await runScenarioJab(
+    "bidirectional (EXPERIMENTAL JAB Code)",
+    payload,
+    (s) => s.runSend("/input_file", 10, 180, 1, false, true),
+    (s) => s.runReceive(10, 1, false, true)
+  );
+
+  await runScenarioJab(
+    "broadcast (EXPERIMENTAL JAB Code)",
+    payload,
+    (s) => s.runBroadcastSend("/input_file", 5.0, 180, 2, 5, false, true),
+    (s) => s.runBroadcastReceive(5.0, 1, false, true)
   );
 
   console.log("\nALL SCENARIOS OK");

@@ -183,8 +183,15 @@ if(WITH_WASM)
     # not something the linker needs to search for, so a direct, checked path is simpler anyway.
     set(QRTP_LIBQRENCODE_LIB "${QRTP_LIBQRENCODE_DIR}/build-wasm/libqrencode.a")
     set(QRTP_ZXING_LIB "${QRTP_ZXINGCPP_DIR}/build-wasm/core/libZXing.a")
-    if(NOT EXISTS "${QRTP_LIBQRENCODE_LIB}" OR NOT EXISTS "${QRTP_ZXING_LIB}")
-        message(FATAL_ERROR "WITH_WASM: libqrencode/zxing-cpp not built yet under third_party/ "
+    # jabcode (github.com/jabcode/jabcode, MIT): EXPERIMENTAL alternate barcode symbology for the
+    # broadcast/unidirectional web mode (see wasm_link.cpp's JsLink -- jabcode_ opt-in, alongside
+    # the classic QR and RGB color-multiplex paths, none of which this touches). Built the same
+    # way as the other two: fetched as source under third_party/, compiled for WASM out-of-tree
+    # (see PROGRESS.md for the exact emcc/emar steps), not pulled in via add_subdirectory().
+    set(QRTP_JABCODE_DIR "${CMAKE_SOURCE_DIR}/third_party/jabcode")
+    set(QRTP_JABCODE_LIB "${QRTP_JABCODE_DIR}/src/jabcode/build-wasm/libjabcode.a")
+    if(NOT EXISTS "${QRTP_LIBQRENCODE_LIB}" OR NOT EXISTS "${QRTP_ZXING_LIB}" OR NOT EXISTS "${QRTP_JABCODE_LIB}")
+        message(FATAL_ERROR "WITH_WASM: libqrencode/zxing-cpp/jabcode not built yet under third_party/ "
                              "(see PROGRESS.md for the build steps)")
     endif()
 
@@ -194,6 +201,7 @@ if(WITH_WASM)
         "${QRTP_LIBQRENCODE_DIR}"
         "${QRTP_ZXINGCPP_DIR}/core/src"
         "${QRTP_ZXINGCPP_DIR}/build-wasm/core" # generated Version.h
+        "${QRTP_JABCODE_DIR}/src/jabcode/include"
     )
     target_compile_features(qrtp_web PRIVATE cxx_std_17)
     # Emscripten disables C++ exception unwinding by default (-fno-exceptions-like behavior at
@@ -205,7 +213,7 @@ if(WITH_WASM)
     # -- including the pre-built libqrencode/zxing-cpp static libs, so those must be (re)built
     # with the same flag (see PROGRESS.md for the updated build steps).
     target_compile_options(qrtp_web PRIVATE -fwasm-exceptions)
-    target_link_libraries(qrtp_web PRIVATE "${QRTP_LIBQRENCODE_LIB}" "${QRTP_ZXING_LIB}")
+    target_link_libraries(qrtp_web PRIVATE "${QRTP_LIBQRENCODE_LIB}" "${QRTP_ZXING_LIB}" "${QRTP_JABCODE_LIB}")
     target_link_options(qrtp_web PRIVATE
         --bind
         -fwasm-exceptions

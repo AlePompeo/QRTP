@@ -27,11 +27,18 @@
 #include <emscripten/val.h>
 
 #include <ReadBarcode.h>
+extern "C" {
+#include <jabcode.h> // pure C11 header, no __cplusplus guard of its own -- wrap it here so the
+                      // symbols compiled into libjabcode.a (plain C, unmangled) actually match.
+}
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -69,9 +76,14 @@ val bridge() { return val::module_property("qrtpBridge"); }
 // unverified-on-real-hardware rather than a default, and native GUIs aren't touched at all.
 class JsLink : public ILink {
 public:
-    explicit JsLink(bool color_multiplex = false) : color_multiplex_(color_multiplex) {}
+    explicit JsLink(bool color_multiplex = false, bool jabcode = false)
+        : color_multiplex_(color_multiplex), jabcode_(jabcode) {}
 
     void send(const std::vector<uint8_t>& frame_bytes) override {
+        if (jabcode_) {
+            send_jabcode(frame_bytes);
+            return;
+        }
         if (!color_multiplex_) {
             send_one(frame_bytes);
             return;
@@ -86,6 +98,7 @@ public:
     }
 
     bool try_receive(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) override {
+        if (jabcode_) return try_receive_jabcode(out, timeout);
         if (!color_multiplex_) return try_receive_one(out, timeout);
 
         // The caller is about to block waiting for a reply to whatever it just sent — anything
@@ -167,9 +180,67 @@ private:
         pending_send_batch_.clear();
     }
 
+    // EXPERIMENTAL: JAB Code (github.com/jabcode/jabcode, MIT) — a genuinely different barcode
+    // symbology from QR, not a variant of it: each module holds one of up to 256 colors directly
+    // (log2(N) bits/module, its own LDPC error correction) instead of a black/white bit, roughly
+    // tripling per-frame capacity at the default 8-color palette used here. Unlike the QR-based
+    // paths above, jab_data is raw-bytes-plus-length with no text/NUL assumption anywhere in the
+    // library, so frame bytes go in directly with no base64 detour — also saves the ~33% base64
+    // overhead the QR paths pay. Mutually exclusive with color_multiplex_ by construction (only
+    // one of the two experimental opt-ins is ever active at once, enforced in web/main.js).
+    void send_jabcode(const std::vector<uint8_t>& frame_bytes) {
+        jab_data* data = static_cast<jab_data*>(std::malloc(sizeof(jab_data) + frame_bytes.size()));
+        if (!data) throw std::runtime_error("jabcode: out of memory building jab_data");
+        data->length = static_cast<jab_int32>(frame_bytes.size());
+        std::memcpy(data->data, frame_bytes.data(), frame_bytes.size());
+
+        jab_encode* enc = createEncode(8, 1); // 8-color palette, single (non-cascaded) symbol
+        if (!enc) {
+            std::free(data);
+            throw std::runtime_error("jabcode: createEncode failed");
+        }
+        // generateJABCode does NOT follow this library's usual JAB_SUCCESS(1)/JAB_FAILURE(0)
+        // convention (verified by reading encoder.c, not assumed from the header comment alone):
+        // it returns 0 on success and a specific non-zero error code per failure path.
+        const jab_int32 status = generateJABCode(enc, data);
+        std::free(data);
+        if (status != 0) {
+            destroyEncode(enc);
+            throw std::runtime_error("jabcode: generateJABCode failed with code " + std::to_string(status));
+        }
+
+        // jab_bitmap's layout (32bpp, RGBA, 4 channels — see jabcode.h) is bit-for-bit identical
+        // to the canvas ImageData format already used everywhere else in this file, so the pixel
+        // buffer goes straight to JS with no conversion, just a safe out-of-heap copy (same
+        // typed_memory_view+slice pattern already used by run_receive()/run_broadcast_receive()
+        // to return the assembled file, for the same reason: never hand JS a raw view into wasm
+        // memory that could be invalidated, and never round-trip binary data through a JS string).
+        const jab_bitmap* bmp = enc->bitmap;
+        const size_t pixel_bytes = static_cast<size_t>(bmp->width) * static_cast<size_t>(bmp->height) * 4;
+        val pixels = val(emscripten::typed_memory_view(pixel_bytes, bmp->pixel)).call<val>("slice");
+        bridge().call<void>("renderJabCode", bmp->width, bmp->height, pixels);
+        destroyEncode(enc);
+
+        // Same dwell pacing contract as send_one()/flush_send_batch() above.
+        const int dwell_ms = static_cast<int>(1000.0 / std::max(1.0, fps_));
+        bridge().call<val>("sleep", dwell_ms).await();
+    }
+
+    bool try_receive_jabcode(std::vector<uint8_t>& out, std::chrono::milliseconds timeout) {
+        val result = bridge().call<val>("waitForFrameJabCode", static_cast<int>(timeout.count())).await();
+        const unsigned len = result["length"].as<unsigned>();
+        if (len == 0) return false;
+        // Payloads here are protocol frames (hundreds of bytes), not multi-megapixel camera
+        // frames — no need for decode_qr_rgba's raw-pointer/no-copy treatment at this scale.
+        out.resize(len);
+        for (unsigned i = 0; i < len; ++i) out[i] = result[i].as<uint8_t>();
+        return true;
+    }
+
     ECLevel ec_level_ = ECLevel::M;
     double fps_ = 10.0;
     bool color_multiplex_ = false;
+    bool jabcode_ = false;
     std::vector<QrMatrix> pending_send_batch_;  // up to 3, R/G/B — color_multiplex_ only
     std::deque<std::string> pending_decoded_;   // decoded base64 texts not yet returned — color_multiplex_ only
 };
@@ -216,6 +287,36 @@ val decode_qr_channels_rgba(uintptr_t ptr, int width, int height) {
     return out;
 }
 
+// EXPERIMENTAL counterpart to decode_qr_rgba()/decode_qr_channels_rgba() for the JAB Code path
+// (see JsLink::send_jabcode()'s comment). jab_bitmap's layout (32bpp, RGBA, 4 channels) is
+// bit-for-bit identical to the RGBA buffer `ptr` already points at, so building one is a single
+// memcpy into a jab_bitmap-shaped allocation (its flexible array member rules out a plain struct
+// copy). Returns the decoded bytes as a JS Uint8Array, never a std::string — jab_data is raw bytes
+// with no text assumption, and a std::string would hit the same TextDecoder/NUL-byte hazard noted
+// throughout this file for the QR paths (see decode_qr_rgba's comment).
+val decode_jabcode_rgba(uintptr_t ptr, int width, int height) {
+    const size_t pixel_bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+    jab_bitmap* bitmap = static_cast<jab_bitmap*>(std::malloc(sizeof(jab_bitmap) + pixel_bytes));
+    if (!bitmap) return val::array();
+    bitmap->width = width;
+    bitmap->height = height;
+    bitmap->bits_per_pixel = 32;
+    bitmap->bits_per_channel = 8;
+    bitmap->channel_count = 4;
+    std::memcpy(bitmap->pixel, reinterpret_cast<const void*>(ptr), pixel_bytes);
+
+    jab_int32 status = 0;
+    jab_data* decoded = decodeJABCode(bitmap, NORMAL_DECODE, &status);
+    std::free(bitmap);
+    if (!decoded) return val::array();
+
+    val out = val(emscripten::typed_memory_view(static_cast<size_t>(decoded->length),
+                                                 reinterpret_cast<uint8_t*>(decoded->data)))
+                  .call<val>("slice");
+    std::free(decoded);
+    return out;
+}
+
 // One transfer session's worth of state: just the cooperative-cancellation flag every
 // Sender/Receiver/BroadcastSender/BroadcastReceiver already accepts (ProtocolConfig::cancel /
 // BroadcastConfig::cancel) — same role as the "Stop" button in gui_win32.cpp/gui_gtk.cpp.
@@ -231,10 +332,10 @@ public:
     // found" (both are just different flavors of "this attempt didn't work," reported the same
     // way to the caller).
     TransferResult run_send(const std::string& path, double fps, int chunk_max, int ec_level,
-                             bool color_multiplex) {
+                             bool color_multiplex, bool jabcode) {
         try {
             cancel_flag_.store(false);
-            JsLink link(color_multiplex);
+            JsLink link(color_multiplex, jabcode);
             ProtocolConfig cfg;
             cfg.adaptive.fps_initial = fps;
             cfg.adaptive.chunk_size_initial = static_cast<size_t>(chunk_max);
@@ -249,10 +350,10 @@ public:
         }
     }
 
-    val run_receive(double fps, int timeout_minutes, bool color_multiplex) {
+    val run_receive(double fps, int timeout_minutes, bool color_multiplex, bool jabcode) {
         try {
             cancel_flag_.store(false);
-            JsLink link(color_multiplex);
+            JsLink link(color_multiplex, jabcode);
             ProtocolConfig cfg;
             cfg.adaptive.fps_initial = fps;
             cfg.cancel = &cancel_flag_;
@@ -278,10 +379,10 @@ public:
     }
 
     BroadcastResult run_broadcast_send(const std::string& path, double fps, int chunk_size, int ec_level, int loops,
-                                        bool color_multiplex) {
+                                        bool color_multiplex, bool jabcode) {
         try {
             cancel_flag_.store(false);
-            JsLink link(color_multiplex);
+            JsLink link(color_multiplex, jabcode);
             BroadcastConfig cfg;
             cfg.chunk_size = static_cast<size_t>(chunk_size);
             cfg.ec_level = static_cast<ECLevel>(ec_level);
@@ -296,10 +397,10 @@ public:
         }
     }
 
-    val run_broadcast_receive(double fps, int timeout_minutes, bool color_multiplex) {
+    val run_broadcast_receive(double fps, int timeout_minutes, bool color_multiplex, bool jabcode) {
         try {
             cancel_flag_.store(false);
-            JsLink link(color_multiplex);
+            JsLink link(color_multiplex, jabcode);
             BroadcastConfig cfg;
             cfg.fps = fps;
             cfg.cancel = &cancel_flag_;
@@ -343,6 +444,7 @@ EMSCRIPTEN_BINDINGS(qrtp_web) {
 
     emscripten::function("decodeQrRgba", &qrtp::web::decode_qr_rgba);
     emscripten::function("decodeQrChannelsRgba", &qrtp::web::decode_qr_channels_rgba);
+    emscripten::function("decodeJabcodeRgba", &qrtp::web::decode_jabcode_rgba);
 
     emscripten::class_<qrtp::web::WebSession>("WebSession")
         .constructor<>()

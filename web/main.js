@@ -37,6 +37,22 @@ const colorLastSeen = ["", "", ""];
 const colorLastReturned = ["", "", ""];
 let colorPendingWaiter = null; // { resolve, timer } | null
 
+// EXPERIMENTAL JAB Code mode (see src/wasm_link.cpp's JsLink -- jabcode_): a different barcode
+// symbology from QR (colored modules, own LDPC error correction), mutually exclusive with the
+// color-multiplex mode above (see the change-listener wiring in main() below). Decoded frames are
+// raw bytes, not text -- de-dup compares byte arrays instead of strings, so this can't reuse
+// lastSeenText/lastReturnedText either.
+let jabcodeActive = false;
+let jabLastSeen = null;
+let jabLastReturned = null;
+let jabPendingWaiter = null; // { resolve, timer } | null
+
+function bytesEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 function log(msg) {
   const el = $("logArea");
   el.value += msg + "\n";
@@ -79,6 +95,17 @@ function offerDecodedColor(channel, text) {
   const resolve = colorPendingWaiter.resolve;
   colorPendingWaiter = null;
   resolve(newly);
+}
+
+function offerDecodedJab(bytes) {
+  jabLastSeen = bytes;
+  if (bytes.length && !bytesEqual(bytes, jabLastReturned) && jabPendingWaiter) {
+    clearTimeout(jabPendingWaiter.timer);
+    jabLastReturned = bytes;
+    const resolve = jabPendingWaiter.resolve;
+    jabPendingWaiter = null;
+    resolve(bytes);
+  }
 }
 
 // Module.qrtpBridge: the JS-side implementation JsLink (src/wasm_link.cpp) calls into, via
@@ -181,6 +208,36 @@ const qrtpBridge = {
         resolve([]);
       }, timeoutMs);
       colorPendingWaiter = { resolve, timer };
+    });
+  },
+
+  // EXPERIMENTAL JAB Code counterpart to renderQr()/renderQrColor(): `pixelsRgba` is already a
+  // ready-to-display RGBA buffer (the JAB Code library rasterizes its own bitmap, unlike QR's
+  // module grid) -- a single putImageData at native resolution, no manual module-to-pixel scaling
+  // loop needed.
+  renderJabCode(width, height, pixelsRgba) {
+    const canvas = $("qrCanvas");
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const ctx = canvas.getContext("2d");
+    const imgData = new ImageData(new Uint8ClampedArray(pixelsRgba), width, height);
+    ctx.putImageData(imgData, 0, 0);
+  },
+
+  waitForFrameJabCode(timeoutMs) {
+    return new Promise((resolve) => {
+      if (jabLastSeen && jabLastSeen.length && !bytesEqual(jabLastSeen, jabLastReturned)) {
+        jabLastReturned = jabLastSeen;
+        resolve(jabLastSeen);
+        return;
+      }
+      const timer = setTimeout(() => {
+        jabPendingWaiter = null;
+        resolve(new Uint8Array(0));
+      }, timeoutMs);
+      jabPendingWaiter = { resolve, timer };
     });
   },
 
@@ -289,11 +346,14 @@ async function startCamera(deviceId) {
         const ptr = DecodeModule._malloc(frame.data.length);
         DecodeModule.HEAPU8.set(frame.data, ptr);
         try {
-          // decodeQrRgba/decodeQrChannelsRgba are plain synchronous C++ functions, but Asyncify
-          // wraps every embind-bound function to return a Promise (it can't know ahead of time
-          // which calls will actually suspend) -- so even these non-suspending calls must be
-          // awaited.
-          if (colorMultiplexActive) {
+          // decodeQrRgba/decodeQrChannelsRgba/decodeJabcodeRgba are plain synchronous C++
+          // functions, but Asyncify wraps every embind-bound function to return a Promise (it
+          // can't know ahead of time which calls will actually suspend) -- so even these
+          // non-suspending calls must be awaited.
+          if (jabcodeActive) {
+            const bytes = await DecodeModule.decodeJabcodeRgba(ptr, capCanvas.width, capCanvas.height);
+            if (bytes && bytes.length) offerDecodedJab(bytes);
+          } else if (colorMultiplexActive) {
             const texts = await DecodeModule.decodeQrChannelsRgba(ptr, capCanvas.width, capCanvas.height);
             for (let c = 0; c < 3; c++) if (texts[c]) offerDecodedColor(c, texts[c]);
           } else {
@@ -363,6 +423,12 @@ async function onStart() {
   colorLastSeen.fill("");
   colorLastReturned.fill("");
 
+  // EXPERIMENTAL JAB Code opt-in -- same reset-per-transfer discipline as the color-multiplex
+  // state above, so a stale value from a previous run can never leak in as a false match.
+  jabcodeActive = $("jabCodeCheck").checked;
+  jabLastSeen = null;
+  jabLastReturned = null;
+
   try {
     if (mode === "bidir" && role === "send") {
       const file = $("fileInput").files[0];
@@ -376,12 +442,12 @@ async function onStart() {
       Module.FS.writeFile(memPath, buf);
       const fps = parseFloat($("fpsInput").value);
       const chunkMax = parseInt($("chunkMaxInput").value, 10);
-      const result = await session.runSend(memPath, fps, chunkMax, ecLevel, colorMultiplexActive);
+      const result = await session.runSend(memPath, fps, chunkMax, ecLevel, colorMultiplexActive, jabcodeActive);
       log("[send] " + (result.success ? "completato: " : "fallito: ") + result.message);
       $("statusLabel").textContent = result.success ? "Invio completato." : "Invio fallito.";
     } else if (mode === "bidir" && role === "receive") {
       const fps = parseFloat($("fpsInput").value);
-      const result = await session.runReceive(fps, 30, colorMultiplexActive);
+      const result = await session.runReceive(fps, 30, colorMultiplexActive, jabcodeActive);
       handleReceiveResult(result);
     } else if (mode === "broadcast" && role === "send") {
       const file = $("fileInput").files[0];
@@ -394,12 +460,12 @@ async function onStart() {
       const loops = parseInt($("loopsInput").value, 10);
       const broadcastFps = parseFloat($("broadcastFpsInput").value);
       const result = await session.runBroadcastSend(
-        memPath, broadcastFps, chunk, ecLevel, loops, colorMultiplexActive);
+        memPath, broadcastFps, chunk, ecLevel, loops, colorMultiplexActive, jabcodeActive);
       log("[broadcast-send] " + (result.success ? "completato: " : "fallito: ") + result.message);
       $("statusLabel").textContent = result.success ? "Invio completato." : "Invio fallito.";
     } else {
       const broadcastFps = parseFloat($("broadcastFpsInput").value);
-      const result = await session.runBroadcastReceive(broadcastFps, 30, colorMultiplexActive);
+      const result = await session.runBroadcastReceive(broadcastFps, 30, colorMultiplexActive, jabcodeActive);
       handleReceiveResult(result);
     }
   } catch (e) {
@@ -444,6 +510,15 @@ async function main() {
     el.addEventListener("change", updateModeUI)
   );
   updateModeUI();
+
+  // The two EXPERIMENTAL encoding opt-ins are alternative symbologies, not cumulative -- checking
+  // one deselects the other. Additive wiring only: neither checkbox itself is touched/replaced.
+  $("colorMultiplexCheck").addEventListener("change", () => {
+    if ($("colorMultiplexCheck").checked) $("jabCodeCheck").checked = false;
+  });
+  $("jabCodeCheck").addEventListener("change", () => {
+    if ($("jabCodeCheck").checked) $("colorMultiplexCheck").checked = false;
+  });
 
   $("camPermBtn").addEventListener("click", async () => {
     try {
