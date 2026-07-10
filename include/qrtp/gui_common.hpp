@@ -43,6 +43,34 @@ void RunGuiTransfer(const GuiTransferParams& params, std::atomic<bool>* cancel,
                      const std::function<void(const std::string&)>& log,
                      const std::function<void(bool, const std::string&)>& done);
 
+// Encrypted point-to-point text messaging via QR (AES-256-GCM + PBKDF2, see crypto.hpp) — the
+// same feature as the web app's "Messaggi cifrati" tab (web/messenger.js), native and wire-format
+// compatible with it: a message encrypted in a browser can be scanned and decrypted by this same
+// native GUI, and vice versa. Reuses the same camera/display tuning knobs as GuiTransferParams
+// (both frontends share a single "Fotocamera" settings group between the two features).
+struct GuiMessengerParams {
+    bool is_write = true; // true: encrypt `message` and display it as a QR; false: scan + decrypt
+    std::string passphrase;
+    std::string message; // only used when is_write
+    int camera_index = 0;
+    int camera_width = OpticalLinkConfig::kAutoMaxResolution;
+    int camera_height = OpticalLinkConfig::kAutoMaxResolution;
+    bool request_mjpeg = true;
+    bool disable_autofocus = false;
+    bool use_wechat_qrcode = true;
+    bool enhance_camera_contrast = true;
+};
+
+// Write mode: shows the encrypted QR (with the same on-screen "STOP" button convention as
+// RunGuiTransfer) until cancelled, then reports done(true, "..."). Read mode: opens the camera and
+// scans until a QR decrypts successfully with `params.passphrase` (wrong-key/foreign QRs are
+// logged and skipped, never surfaced as garbage) or cancellation; on success, `done`'s message is
+// the decrypted plaintext itself. Same cooperative-cancellation and thread-marshaling convention
+// as RunGuiTransfer — call this from a background worker thread, never the UI thread.
+void RunGuiMessenger(const GuiMessengerParams& params, std::atomic<bool>* cancel,
+                     const std::function<void(const std::string&)>& log,
+                     const std::function<void(bool, const std::string&)>& done);
+
 } // namespace qrtp
 
 #endif // QRTP_WITH_OPENCV

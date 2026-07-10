@@ -29,9 +29,10 @@ have never met before to exchange something with a physical, visual guarantee of
   adapts QR density/error-correction/frame rate to the actual optical error rate in real time.
 - **Runs everywhere** — native CLI and GUI for Linux and Windows, plus a WebAssembly build that
   runs the identical protocol core in any browser, phone included.
-- **Encrypted messaging, same medium** — the web app's "Messaggi cifrati" tab lets two people
-  swap short encrypted notes via QR (AES-256-GCM, PBKDF2-derived key) without touching the file
-  transfer protocol at all.
+- **Encrypted messaging, same medium** — "Messaggi cifrati" lets two people swap short encrypted
+  notes via QR (AES-256-GCM, PBKDF2-derived key) without touching the file transfer protocol at
+  all. Available in the web app and natively in both the Windows and Linux GUIs, all wire-format
+  compatible with each other.
 - **Experimental higher-throughput symbologies** — optional RGB color-multiplexed QR and JAB Code
   modes in the web app, for up to ~3x the data per frame.
 
@@ -130,6 +131,19 @@ phone are enough.
   ```
   Without OpenCV, everything else builds and runs (`render-qr`, `demo`, and the full test suite) —
   `send`/`receive` just print a message telling you to rebuild with `WITH_OPENCV=1`.
+- The **"Messaggi cifrati" encrypted-messaging feature** (native GUIs only, see
+  [Native GUI apps](#native-gui-apps-windows-and-linux) below) uses OpenSSL's `libcrypto` on
+  Linux/macOS, also loaded at runtime via `dlopen` — same "no `-devel` package required" deal as
+  `libqrencode` above:
+  ```bash
+  sudo dnf install openssl-libs   # usually already present; or: apt install libssl3
+  ```
+  On Windows it uses the built-in CNG/BCrypt API instead (part of Windows itself, nothing to
+  install). The rest of the app works fine without this — only the messenger tool needs it.
+- The **native Linux GUI** (`qrtp_gui`, `make bin/qrtp_gui WITH_OPENCV=1`) additionally needs GTK3:
+  ```bash
+  sudo dnf install gtk3-devel   # or: apt install libgtk-3-dev
+  ```
 
 ---
 
@@ -305,6 +319,41 @@ stream was active.
 
 ---
 
+## Native GUI apps (Windows and Linux)
+
+Both native platforms have a point-and-click app, `qrtp_gui`, with the **same two tools as the web
+app**: "Trasferimento file" and "Messaggi cifrati" — the encrypted QR messaging feature (AES-256-GCM
++ PBKDF2, see [Web app](#web-app-browser-no-install) above) is also implemented natively, not just
+in the browser, and uses the identical wire format — a message encrypted on a phone in a browser
+decrypts on a desktop running the native app, and vice versa. The native messenger reuses the same
+`OpticalLink` camera/display code the file-transfer tool already uses, so there's no separate
+camera pipeline to trust.
+
+- **Windows** (`qrtp_gui.exe`, `src/gui_win32.cpp`) — plain Win32, no extra GUI framework. Built as
+  part of [Building on Windows](#building-on-windows) above (`cmake --build build --config
+  Release`, `WITH_OPENCV=ON`). A "Strumento" selector at the top switches between the two tools,
+  which share the same window (Win32 has no lightweight tab control, unlike GTK — see below).
+- **Linux** (`qrtp_gui`, `src/gui_gtk.cpp`) — GTK3, no `.ui`/Glade file, built with `make
+  bin/qrtp_gui WITH_OPENCV=1` (needs `gtk3-devel`/`libgtk-3-dev`/`gtk3` — see
+  [Requirements](#requirements)). The two tools are literal tabs (`GtkNotebook`), matching the web
+  app's own tab layout; both share the same "Fotocamera" settings group.
+
+**Verification status differs sharply between the two, worth being explicit about**: the Linux
+build is genuinely compiled *and tested* — `make test WITH_OPENCV=1` passes natively on Fedora and,
+via disposable containers, on real Ubuntu 24.04 and Debian 12 too (each against that distro's own
+OpenCV/GTK3/OpenSSL packages), and `qrtp_gui` launched under a real `DISPLAY` without crashing
+(though a screenshot to confirm the on-screen layout wasn't possible in this environment — see
+`not_working.md`). The Windows build is cross-compiled via MinGW and **link-verified only**: all
+three `.exe` files build and link cleanly, `bcrypt.dll`'s import table is confirmed correct via
+`objdump`, but nothing has actually *run* on Windows (no Wine available here). There is also a real
+open compatibility question for Windows specifically: this project's declared minimum is Windows 7,
+but AES-GCM support in Windows' own CNG/BCrypt API is *recalled*, not confirmed, to require Windows
+8 — if so, "Messaggi cifrati" (only that feature, not file transfer) would fail at runtime on real
+Windows 7 with a clear error rather than silently misbehaving. See `not_working.md` for the
+specifics; treat this as unverified until checked against real Windows or authoritative docs.
+
+---
+
 ## Architecture
 
 ```
@@ -314,14 +363,17 @@ include/qrtp/       Public headers
 src/                Implementation
   crc32.*           CRC-32/ISO-HDLC (frame integrity)
   sha256.*          SHA-256 from scratch (end-to-end file integrity)
+  crypto.*          AES-256-GCM + PBKDF2 for "Messaggi cifrati" (OpenSSL/dlopen on Linux, BCrypt on Windows)
   framing.*         Binary frame header pack/unpack, bounds- and CRC-checked
   adaptive.*         AIMD controller: window size, chunk size, EC level, FPS, RTT/RTO estimation
   link.*            ILink interface + LoopbackLink (hardware-free, thread-safe, lossy channel sim)
   qr_encoder.*       Real QR generation via libqrencode, loaded with dlopen (no -devel needed)
   optical_link.*     Real screen+camera ILink, gated behind WITH_OPENCV=1 (uses OpenCV)
   protocol.*         Sender/Receiver: handshake, sliding window, selective-repeat ARQ, teardown
+  gui_common.*       RunGuiTransfer/RunGuiMessenger: shared logic behind both native GUIs below
   main.cpp           CLI (render-qr / demo / send / receive)
   gui_win32.cpp      Native Win32 GUI (qrtp_gui.exe), Windows + WITH_OPENCV only
+  gui_gtk.cpp        Native GTK3 GUI (qrtp_gui), Linux + WITH_OPENCV only
 tests/test_main.cpp  Self-contained assertions, no external test framework
 windows/
   installer.iss      Inno Setup script — packages qrtp_gui.exe into an installer

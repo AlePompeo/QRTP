@@ -26,6 +26,7 @@ set(QRTP_CORE_SOURCES
     src/crc32.cpp
     src/sha256.cpp
     src/base64.cpp
+    src/crypto.cpp
     src/framing.cpp
     src/adaptive.cpp
     src/link.cpp
@@ -81,9 +82,18 @@ find_package(Threads REQUIRED)
 target_link_libraries(qrtp_core PUBLIC Threads::Threads)
 
 if(UNIX)
-    # dlopen/dlsym for qr_encoder.cpp's runtime-loaded libqrencode (Windows uses
-    # LoadLibrary/GetProcAddress instead, which need no extra link library).
+    # dlopen/dlsym for qr_encoder.cpp's runtime-loaded libqrencode and crypto.cpp's runtime-loaded
+    # libcrypto (Windows uses LoadLibrary/GetProcAddress and the built-in BCrypt API instead,
+    # neither of which need this).
     target_link_libraries(qrtp_core PUBLIC ${CMAKE_DL_LIBS})
+endif()
+
+if(WIN32)
+    # crypto.cpp's AES-256-GCM/PBKDF2 implementation uses bcrypt.dll (Windows CNG) directly, not
+    # dlopen -- it's part of Windows itself since Vista, the same tier as user32/gdi32 already
+    # linked elsewhere in this project, not a third-party optional dependency like OpenCV/
+    # libqrencode. Always available in a MinGW or MSVC Windows SDK, no extra install.
+    target_link_libraries(qrtp_core PUBLIC bcrypt)
 endif()
 
 add_executable(qrtp src/main.cpp)

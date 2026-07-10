@@ -12,6 +12,7 @@
 #include "qrtp/base64.hpp"
 #include "qrtp/broadcast.hpp"
 #include "qrtp/crc32.hpp"
+#include "qrtp/crypto.hpp"
 #include "qrtp/fountain.hpp"
 #include "qrtp/framing.hpp"
 #include "qrtp/link.hpp"
@@ -89,6 +90,68 @@ void test_sha256() {
         const char* s = "abc";
         const auto d = qrtp::sha256(reinterpret_cast<const uint8_t*>(s), 3);
         CHECK(qrtp::sha256_hex(d) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+}
+
+void test_crypto() {
+    // PBKDF2-HMAC-SHA256 known-answer test (password="password", salt="salt", c=1, dkLen=32) --
+    // independently computed via Python's hashlib.pbkdf2_hmac, not derived from this code.
+    {
+        const std::vector<uint8_t> salt = {'s', 'a', 'l', 't'};
+        const auto dk = qrtp::pbkdf2_hmac_sha256("password", salt, 1, 32);
+        char hex[65] = {0};
+        for (size_t i = 0; i < dk.size(); ++i) std::snprintf(hex + i * 2, 3, "%02x", dk[i]);
+        CHECK(std::string(hex) == "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b");
+    }
+
+    // AES-256-GCM known-answer test -- independently computed via Python's cryptography
+    // library (AESGCM), not derived from this code.
+    {
+        const std::vector<uint8_t> key = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f};
+        const std::vector<uint8_t> iv = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b};
+        const std::string pt = "hello qrtp messenger";
+        const std::vector<uint8_t> ptv(pt.begin(), pt.end());
+        const auto ct = qrtp::aes256gcm_encrypt(key, iv, ptv);
+        char hex[2 * (20 + 16) + 1] = {0};
+        for (size_t i = 0; i < ct.size(); ++i) std::snprintf(hex + i * 2, 3, "%02x", ct[i]);
+        CHECK(std::string(hex) == "2f67ba77aac5b369f931b7e6d49a0b08edb1e24611b58f7fb8d1ab00fd9799fe61defe86");
+
+        const auto decrypted = qrtp::aes256gcm_decrypt(key, iv, ct);
+        CHECK(std::string(decrypted.begin(), decrypted.end()) == pt);
+
+        // A flipped ciphertext byte must fail authentication, never silently decrypt to
+        // garbage -- this is the actual security property GCM exists to provide.
+        auto tampered = ct;
+        tampered[0] ^= 0xFF;
+        bool threw = false;
+        try { qrtp::aes256gcm_decrypt(key, iv, tampered); }
+        catch (const std::exception&) { threw = true; }
+        CHECK(threw);
+    }
+
+    // High-level encrypt_message/decrypt_message round-trip (random salt/iv each call).
+    {
+        const std::string passphrase = "test passphrase";
+        const std::string message = "hello native crypto";
+        const std::string encoded = qrtp::encrypt_message(passphrase, message);
+        CHECK(qrtp::decrypt_message(passphrase, encoded) == message);
+
+        bool threw = false;
+        try { qrtp::decrypt_message("wrong passphrase", encoded); }
+        catch (const std::exception&) { threw = true; }
+        CHECK(threw);
+    }
+
+    // Cross-platform wire-format vector: a full QR payload independently generated via
+    // Python (PBKDF2 100k iterations + AES-256-GCM + the exact salt||iv||ciphertext base64
+    // layout), matching web/messenger.js byte-for-byte -- proves this native implementation
+    // can decrypt a message a browser encrypted, and (by symmetry of the same primitives)
+    // vice versa.
+    {
+        const std::string passphrase = "qrtp-cross-platform-test";
+        const std::string b64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGzQd6oAhYyKlxfClryoxgs3DGnxSL0kTfVMZqht+wIfui7E7VdQ5tXpQzygIWeTt/NR/iWhqI1cgziLLgfaG2+Ob5EKEsDroTFpe/w==";
+        const std::string expected = "Interoperability test between web and native QRTP messenger";
+        CHECK(qrtp::decrypt_message(passphrase, b64) == expected);
     }
 }
 
@@ -454,6 +517,7 @@ int main() {
     test_crc32();
     test_base64();
     test_sha256();
+    test_crypto();
     test_framing_roundtrip();
     test_adaptive_aimd();
     test_qr_encoder();

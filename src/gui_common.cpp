@@ -4,6 +4,7 @@
 #include <fstream>
 
 #include "qrtp/broadcast.hpp"
+#include "qrtp/crypto.hpp"
 #include "qrtp/protocol.hpp"
 
 namespace qrtp {
@@ -83,6 +84,57 @@ void RunGuiTransfer(const GuiTransferParams& params, std::atomic<bool>* cancel,
             std::ofstream f(out_path, std::ios::binary);
             f.write(reinterpret_cast<const char*>(received->data()), static_cast<std::streamsize>(received->size()));
             done(true, "wrote " + std::to_string(received->size()) + " bytes to " + out_path.string());
+        }
+    } catch (const std::exception& e) {
+        done(false, e.what());
+    }
+}
+
+void RunGuiMessenger(const GuiMessengerParams& params, std::atomic<bool>* cancel,
+                     const std::function<void(const std::string&)>& log,
+                     const std::function<void(bool, const std::string&)>& done) {
+    try {
+        OpticalLinkConfig ocfg;
+        ocfg.camera_index = params.camera_index;
+        ocfg.camera_width = params.camera_width;
+        ocfg.camera_height = params.camera_height;
+        ocfg.request_mjpeg = params.request_mjpeg;
+        ocfg.disable_autofocus = params.disable_autofocus;
+        ocfg.use_wechat_qrcode = params.use_wechat_qrcode;
+        ocfg.enhance_camera_contrast = params.enhance_camera_contrast;
+        ocfg.log = log;
+        ocfg.cancel = cancel;
+        OpticalLink link(ocfg);
+
+        if (params.is_write) {
+            const std::string encoded = encrypt_message(params.passphrase, params.message);
+            const std::vector<uint8_t> bytes(encoded.begin(), encoded.end());
+            log("QR mostrato — premi Ferma per chiuderlo.");
+            // Re-sending the identical content repeatedly (rather than once and idling) is what
+            // keeps OpticalLink's window pumped/responsive and its on-screen "STOP" button
+            // clickable — send()'s own cv::waitKey(1000/fps) call already paces this loop, exactly
+            // the same idiom BroadcastSender uses for its own repeated send() calls.
+            while (!(cancel && cancel->load())) {
+                link.send(bytes);
+            }
+            done(true, "QR chiuso.");
+        } else {
+            log("In attesa di un QR...");
+            std::vector<uint8_t> out;
+            while (!(cancel && cancel->load())) {
+                if (!link.try_receive(out, std::chrono::milliseconds(200))) continue;
+                const std::string text(out.begin(), out.end());
+                try {
+                    done(true, decrypt_message(params.passphrase, text));
+                    return;
+                } catch (const std::exception&) {
+                    // Wrong passphrase, or a QR from something else entirely — AES-GCM's own
+                    // authentication tag failed to verify. Never surface partial/garbage
+                    // plaintext, just log and keep scanning (same as web/messenger.js).
+                    log("QR non leggibile con questa chiave — riprovo a scansionare...");
+                }
+            }
+            done(false, "cancellato");
         }
     } catch (const std::exception& e) {
         done(false, e.what());
