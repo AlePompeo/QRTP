@@ -7,7 +7,19 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<h1>QRTP — trasferimento file via QR (browser)</h1>
+<h1>QRTP — trasferimento file e messaggi via QR (browser)</h1>
+<p class="hint">
+  Due strumenti indipendenti nella stessa pagina: il trasferimento file via QR (protocollo
+  ARQ/AIMD, WebAssembly) e una messaggistica testuale cifrata punto-punto. Nessuna rete: tutto
+  passa da schermo a fotocamera.
+</p>
+
+<div class="toolbar" role="tablist">
+  <button type="button" id="tabTransferBtn" class="tab-btn active" role="tab" aria-selected="true">Trasferimento file</button>
+  <button type="button" id="tabMessengerBtn" class="tab-btn" role="tab" aria-selected="false">Messaggi cifrati</button>
+</div>
+
+<div id="panel-transfer">
 <p class="hint">
   Stessa logica di trasferimento del progetto nativo (protocollo ARQ/AIMD invariato, vedi
   <code>src/wasm_link.cpp</code>) eseguita qui via WebAssembly — camera e schermo sostituiscono
@@ -120,7 +132,85 @@
   <legend>Log</legend>
   <textarea id="logArea" readonly></textarea>
 </fieldset>
+</div><!-- /panel-transfer -->
+
+<div id="panel-messenger" class="hidden">
+  <p class="hint">
+    Messaggistica cifrata offline via QR — adattata da
+    <a href="https://github.com/AlePompeo/qr-messenger" target="_blank" rel="noopener">qr-messenger</a>.
+    Scrivi un messaggio, viene cifrato con <strong>AES-256-GCM</strong> (chiave derivata via PBKDF2
+    da una frase condivisa) e mostrato come QR; l'altra persona lo scansiona (o carica una foto) e
+    lo decifra. Indipendente dal trasferimento file sopra: cifratura, formato QR e librerie sono
+    completamente separati.
+  </p>
+
+  <fieldset>
+    <legend>Chiave condivisa</legend>
+    <input type="password" id="msgPassphrase" placeholder="Frase segreta, identica sui due dispositivi" autocomplete="off" style="width:100%; max-width:420px;">
+    <span class="hint">Resta solo in locale (localStorage di questa pagina), non viene mai trasmessa.</span>
+  </fieldset>
+
+  <div id="msgHomeView">
+    <div class="controls">
+      <button type="button" id="msgWriteBtn">✍️ Scrivi messaggio</button>
+      <button type="button" id="msgReadBtn">📷 Leggi messaggio</button>
+    </div>
+  </div>
+
+  <div id="msgWriteView" class="hidden">
+    <fieldset>
+      <legend>Scrivi messaggio</legend>
+      <textarea id="msgTextInput" maxlength="1000" rows="6" style="width:100%;"></textarea>
+      <div class="hint"><span id="msgCharCount">0</span>/1000</div>
+      <div class="controls">
+        <button type="button" id="msgGenerateBtn">Genera QR</button>
+        <button type="button" id="msgWriteBackBtn">Indietro</button>
+      </div>
+      <p id="msgWriteError" class="error"></p>
+    </fieldset>
+    <div class="canvases">
+      <canvas id="msgQrCanvas" class="hidden"></canvas>
+    </div>
+  </div>
+
+  <div id="msgReadView" class="hidden">
+    <fieldset>
+      <legend>Leggi messaggio</legend>
+      <select id="msgCameraSelect" class="hidden"></select>
+      <div id="msgZoomControl" class="hidden">
+        <label>Zoom ottico
+          <input type="range" id="msgZoomSlider">
+          <span id="msgZoomValue"></span>
+        </label>
+        <button type="button" id="msgTorchBtn" class="hidden">🔦 Torcia</button>
+      </div>
+      <video id="msgCameraVideo" autoplay playsinline muted></video>
+      <div class="controls">
+        <button type="button" id="msgUploadBtn">📁 Carica foto</button>
+        <input type="file" id="msgFileInput" accept="image/*" class="hidden">
+        <button type="button" id="msgReadBackBtn">Indietro</button>
+      </div>
+      <p id="msgReadStatus" class="hint">Inquadra il QR, o carica una foto salvata...</p>
+      <img id="msgDebugPreview" class="hidden msg-debug-preview" alt="Anteprima diagnostica dell'ultima foto caricata">
+    </fieldset>
+  </div>
+
+  <div id="msgResultView" class="hidden">
+    <fieldset>
+      <legend>Messaggio ricevuto</legend>
+      <div id="msgResultText" class="message-box"></div>
+      <div class="controls">
+        <button type="button" id="msgScanAgainBtn">Scansiona un altro</button>
+        <button type="button" id="msgResultBackBtn">Indietro</button>
+      </div>
+    </fieldset>
+  </div>
+</div><!-- /panel-messenger -->
 
 <script type="module" src="main.js"></script>
+<script src="vendor/qrcode_core.js"></script>
+<script src="vendor/qrcode.js"></script>
+<script src="vendor/jsQR.js"></script>
+<script src="messenger.js"></script>
 </body>
 </html>

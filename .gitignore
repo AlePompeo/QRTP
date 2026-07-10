@@ -11,3 +11,10 @@
 /build-wasm/
 /web/qrtp_web.js
 /web/qrtp_web.wasm
+
+# Internal dev notes / AI-assistant working files -- not part of the public project docs.
+/CLAUDE.md
+/code_review.md
+/PROGRESS.md
+/not_working.md
+/.claude/

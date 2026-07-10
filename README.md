@@ -1,10 +1,39 @@
 # QRTP — QR Transfer Protocol
 
-A TCP-like file transfer protocol that runs entirely over an **optical, air-gapped channel**: a
-monitor displaying a real-time sequence of QR codes on one machine, read by a webcam on another.
-No network, no cable, no internet — just light. Implemented in C++17, zero required third-party
-dependencies for the protocol core (the real screen/camera backend is an optional add-on — see
-below).
+Send files — and now encrypted text messages — between two computers or phones **using nothing
+but a screen and a camera**. No Wi-Fi, no Bluetooth, no cable, no shared network of any kind: one
+device flashes a live sequence of QR codes, the other reads them back with its camera. If you can
+point a camera at a screen, you can move data across an air gap.
+
+Two things live in this repository:
+
+- **QRTP itself** — a real, TCP-like transfer protocol (handshake, sequence numbers, sliding
+  window, retransmission, adaptive rate control) built from scratch on top of QR codes as the
+  physical medium, implemented in C++17 with a native CLI/GUI (Linux, Windows) and a browser build
+  (WebAssembly).
+- **A browser-based, end-to-end encrypted messaging tool** (in `web/`, adapted from the companion
+  [qr-messenger](https://github.com/AlePompeo/qr-messenger) project) for the simpler case of just
+  swapping a short secret note — no file transfer protocol needed, just AES-256-GCM and a shared
+  passphrase.
+
+Both run in any modern browser with no install, and both are useful in the same situations: no
+network available, don't trust the network that is available, or you just want two devices that
+have never met before to exchange something with a physical, visual guarantee of what's being sent.
+
+## At a glance
+
+- **Air-gapped by construction** — the only path between the two devices is optical; there is no
+  socket to intercept, because there is no socket.
+- **A real transport protocol, not a slideshow** — 3-way handshake, selective-repeat ARQ,
+  cumulative + selective ACKs, per-frame CRC32, end-to-end SHA-256, and an AIMD controller that
+  adapts QR density/error-correction/frame rate to the actual optical error rate in real time.
+- **Runs everywhere** — native CLI and GUI for Linux and Windows, plus a WebAssembly build that
+  runs the identical protocol core in any browser, phone included.
+- **Encrypted messaging, same medium** — the web app's "Messaggi cifrati" tab lets two people
+  swap short encrypted notes via QR (AES-256-GCM, PBKDF2-derived key) without touching the file
+  transfer protocol at all.
+- **Experimental higher-throughput symbologies** — optional RGB color-multiplexed QR and JAB Code
+  modes in the web app, for up to ~3x the data per frame.
 
 The design mirrors the classic **TCP/IP layering** (Physical → Framing → Transport → Application):
 
@@ -199,6 +228,43 @@ viewer (or `convert out.pbm out.png`).
 
 ---
 
+## Web app (browser, no install)
+
+`web/` is a static site — no server-side code, no build step to distribute it — that runs the same
+protocol core compiled to WebAssembly, plus a second, independent encrypted-messaging tool. Grab
+`qrtp-web.zip` from [Releases](https://github.com/AlePompeo/qrtp/releases), unzip it, and serve it
+over plain HTTP (opening
+`index.html` directly as a `file://` URL won't work — browsers block WebAssembly/ES module loading
+from local files):
+
+```bash
+cd qrtp-web        # the unzipped folder
+python3 -m http.server 8000
+```
+
+Open `http://localhost:8000/` on both devices. The page has two independent tabs:
+
+- **Trasferimento file** — the WASM port of QRTP itself: pick a role (send/receive), a mode
+  (bidirectional or one-way broadcast), grant camera access, and go. Same ARQ/AIMD logic as the
+  native build (`src/wasm_link.cpp` reuses the protocol core unmodified), plus the experimental
+  color-multiplex QR and JAB Code toggles for higher throughput.
+- **Messaggi cifrati** — encrypted point-to-point text messaging, integrated from
+  [qr-messenger](https://github.com/AlePompeo/qr-messenger): set the same shared passphrase on
+  both devices, write a message, and it's encrypted (**AES-256-GCM**, key derived via **PBKDF2**
+  with 100,000 iterations and a random salt) and shown as a QR code for the other device to scan
+  (or decode from an uploaded photo). Anyone who scans the QR without the passphrase — even with a
+  different app — sees only opaque ciphertext; a wrong passphrase makes AES-GCM's own
+  authentication tag fail instead of showing corrupted text. This isn't meant for high-risk
+  communications (no forward secrecy, and the passphrase itself must be agreed on over a channel
+  you already trust), but it's robust against anyone who only ever sees the QR code itself.
+
+The two tabs are fully independent — different encoding, different libraries (the file-transfer
+tab uses the WASM protocol core; the messenger tab uses `qrcode-generator` and `jsQR`, vendored
+under `web/vendor/` with their original licenses), and switching tabs releases whichever camera
+stream was active.
+
+---
+
 ## Architecture
 
 ```
@@ -219,6 +285,11 @@ src/                Implementation
 tests/test_main.cpp  Self-contained assertions, no external test framework
 windows/
   installer.iss      Inno Setup script — packages qrtp_gui.exe into an installer
+web/                 Static browser app (see "Web app" above), built via WITH_WASM
+  index.html          Two tabs: file transfer + encrypted messaging
+  main.js             File-transfer tab: camera capture, QR render/decode bridge to the WASM module
+  messenger.js         Encrypted-messaging tab: AES-256-GCM/PBKDF2, independent of the WASM module
+  vendor/              Third-party libs for the messenger tab (qrcode-generator, jsQR) + licenses
 ```
 
 ### Frame format

@@ -380,6 +380,9 @@ function stopCamera() {
     mediaStream = null;
   }
 }
+// Exposed so messenger.js (a separate, non-module script) can release this tab's camera when the
+// user switches to the "Messaggi cifrati" tab -- the two features are otherwise fully independent.
+window.qrtpStopTransferCamera = stopCamera;
 
 function selectedRole() { return document.querySelector('input[name="role"]:checked').value; }
 function selectedMode() { return document.querySelector('input[name="mode"]:checked').value; }

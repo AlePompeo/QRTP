@@ -67,10 +67,106 @@ label {
   border: 1px solid #9c9;
 }
 
+/* ----------------------------------------------------------- tabs (transfer / messenger) */
+.toolbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid #ccc;
+}
+
+.tab-btn {
+  padding: 0.5rem 1rem;
+  border: 1px solid #ccc;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: #f2f2f2;
+  cursor: pointer;
+}
+
+.tab-btn.active {
+  background: #fff;
+  font-weight: 600;
+  border-color: #2f6feb;
+  color: #2f6feb;
+}
+
+/* ----------------------------------------------------------- messenger panel */
+#msgCameraVideo {
+  display: block;
+  width: 100%;
+  max-width: 480px;
+  margin: 0.5rem 0;
+  background: #000;
+  border: 1px solid #ccc;
+}
+
+#msgQrCanvas {
+  width: min(90vw, 420px);
+  height: min(90vw, 420px);
+  image-rendering: pixelated;
+  border: 1px solid #ccc;
+  background: #fff;
+  cursor: zoom-in;
+}
+/* Tap/click the canvas to view it fullscreen -- makes the QR big enough for the other person's
+   camera to scan comfortably; always square, so a plain stretch-to-fill never distorts it. */
+#msgQrCanvas:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  object-fit: contain;
+  background: #fff;
+  cursor: zoom-out;
+}
+
+.message-box {
+  background: #f7f7f7;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  padding: 1rem;
+  font-size: 1.05rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 4rem;
+}
+
+.error {
+  color: #c0392b;
+  font-size: 0.85rem;
+  min-height: 1.2em;
+}
+
+.msg-debug-preview {
+  display: block;
+  max-width: 140px;
+  max-height: 200px;
+  margin-top: 0.5rem;
+  border: 2px solid #ccc;
+  border-radius: 6px;
+  cursor: zoom-in;
+}
+.msg-debug-preview.expanded {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  max-width: 96vw;
+  max-height: 96vh;
+  width: auto;
+  height: auto;
+  z-index: 10;
+  cursor: zoom-out;
+}
+
 @media (prefers-color-scheme: dark) {
   body { background: #1e1e1e; color: #ddd; }
   .hint { color: #999; }
   #qrCanvas { background: #fff; } /* QR must stay black-on-white regardless of page theme */
   #logArea { background: #111; color: #ddd; border: 1px solid #444; }
   #downloadArea { background: #163016; border-color: #3a6; color: #ddd; }
+  .toolbar { border-color: #444; }
+  .tab-btn { background: #262c36; color: #ddd; border-color: #444; }
+  .tab-btn.active { background: #1e1e1e; border-color: #5b9bff; color: #5b9bff; }
+  #msgQrCanvas { background: #fff; } /* QR must stay black-on-white regardless of page theme */
+  .message-box { background: #1c2129; border-color: #444; color: #ddd; }
 }
