@@ -72,6 +72,46 @@ verified end-to-end. That's what makes it a protocol and not just a slideshow.
 
 ---
 
+## Why optical: built for RF-denied and RF-restricted environments
+
+Every other way two nearby devices normally exchange data — Wi-Fi, Bluetooth, NFC, cellular —
+depends on a radio transmitting into the air. QRTP doesn't: the only thing that ever crosses the
+gap between the two machines is **visible light on a screen**. That one property is what makes it
+useful in places where RF-based transfer isn't just inconvenient, it's not allowed or not safe:
+
+- **Communications-denied / contested environments.** In a jammed or actively contested spectrum
+  (electronic warfare, hostile signals intelligence), an RF transmitter is a liability twice over:
+  it can be jammed into uselessness, and merely keying up gives away your position to anyone doing
+  direction-finding. A screen showing QR codes emits nothing a radio receiver can detect — the only
+  way to intercept it is to physically see the screen, which is a far easier thing to control
+  (line-of-sight, distance, shielding, room layout) than an RF footprint that can travel through
+  walls and be picked up from well outside the room.
+- **EMCON / emissions-controlled operations.** Some environments mandate radio silence outright —
+  ships and aircraft under EMCON, tactical units maintaining low observability. QRTP moves real
+  data (files, and now encrypted messages) between two devices without switching on a single radio,
+  so it doesn't violate that silence at all, rather than needing an exception carved out for it.
+- **Classified or RF-restricted facilities (SCIFs and similar).** Many secure facilities ban RF
+  transceivers entirely, precisely because *any* radio — even one that's "supposed" to be
+  short-range or encrypted — is a potential exfiltration channel or an attack surface (rogue
+  Bluetooth/Wi-Fi pairing, RF side-channel leakage). A laptop and a webcam showing QR codes at each
+  other satisfies "no RF in the room" by construction, with no radio to audit, disable, or trust.
+- **RF-sensitive or hazardous physical environments.** Hospitals with equipment sensitive to
+  interference, aircraft cabins/cockpits, and industrial sites with explosive atmospheres (ATEX/
+  IECEx-classified zones, fuel depots, mines) all restrict or ban RF transmitters for safety
+  reasons — a spark from a poorly-shielded radio, or interference with life-critical equipment, is
+  a real risk a light-based link simply doesn't carry.
+- **Air-gapped networks.** The classic reason to air-gap a network is to keep it off the internet
+  and off any wireless bridge that could reach it. QRTP is a way to still move data in or out of
+  that network without punching an RF (or wired network) hole in the air gap to do it — the
+  physical medium enforces the boundary, it isn't just a policy asking people not to plug in a
+  cable or turn on hotspot.
+
+None of this requires special hardware: any screen and any camera work, which is exactly why this
+also runs as a browser build (see [Web app](#web-app-browser-no-install) below) — a laptop and a
+phone are enough.
+
+---
+
 ## Requirements
 
 - A C++17 compiler and `make` (developed against GCC 15; no CMake needed)
