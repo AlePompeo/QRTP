@@ -500,6 +500,10 @@ designed. Real screen+camera throughput will be dominated by camera capture/deco
 display refresh sync rather than QR capacity itself; the adaptive controller's job is to find the
 actual achievable operating point for a given camera/lighting setup rather than assume one.
 
+## License
+
+MIT License, see [`LICENSE`](LICENSE).
+
 ---
 
 *Keywords: QR code, air-gapped file transfer, optical data transfer, screen to camera, encrypted messaging, data diode, RF-denied, C++17, ARQ, CRC32, SHA-256, OpenCV, libqrencode.*
