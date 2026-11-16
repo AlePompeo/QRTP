@@ -1,5 +1,7 @@
 # QRTP — QR Transfer Protocol
 
+![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white) ![Air-gapped](https://img.shields.io/badge/Air--gapped-screen%20to%20camera-2e7d32) ![Platforms](https://img.shields.io/badge/Platforms-Linux%20%C2%B7%20Windows%20%C2%B7%20Web-555) ![Dependencies](https://img.shields.io/badge/Core%20dependencies-none-success)
+
 Send files — and now encrypted text messages — between two computers or phones **using nothing
 but a screen and a camera**. No Wi-Fi, no Bluetooth, no cable, no shared network of any kind: one
 device flashes a live sequence of QR codes, the other reads them back with its camera. If you can
@@ -19,6 +21,10 @@ Two things live in this repository:
 Both run in any modern browser with no install, and both are useful in the same situations: no
 network available, don't trust the network that is available, or you just want two devices that
 have never met before to exchange something with a physical, visual guarantee of what's being sent.
+
+**Contents:** [At a glance](#at-a-glance) · [How it works](#how-it-works) · [Why optical: built for RF-denied and RF-restricted environments](#why-optical-built-for-rf-denied-and-rf-restricted-environments) · [Requirements](#requirements) · [Build & test](#build--test) · [Building on Windows](#building-on-windows) · [Usage](#usage) · [Web app (browser, no install)](#web-app-browser-no-install) · [Native GUI apps (Windows and Linux)](#native-gui-apps-windows-and-linux) · [Architecture](#architecture) · [What broke during testing (and why)](#what-broke-during-testing-and-why) · [On throughput](#on-throughput)
+
+---
 
 ## At a glance
 
@@ -493,3 +499,7 @@ window=6/chunk=68 by the time the transfer completes — self-correcting in both
 designed. Real screen+camera throughput will be dominated by camera capture/decode latency and
 display refresh sync rather than QR capacity itself; the adaptive controller's job is to find the
 actual achievable operating point for a given camera/lighting setup rather than assume one.
+
+---
+
+*Keywords: QR code, air-gapped file transfer, optical data transfer, screen to camera, encrypted messaging, data diode, RF-denied, C++17, ARQ, CRC32, SHA-256, OpenCV, libqrencode.*
